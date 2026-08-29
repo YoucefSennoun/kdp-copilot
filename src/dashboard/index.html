@@ -1,0 +1,209 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>KDP Copilot</title>
+    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/@picocss/pico@2/css/pico.min.css" />
+    <style>
+      :root {
+        --pico-font-size: 15px;
+      }
+      body {
+        padding: 1.5rem 2rem 3rem;
+        max-width: 1280px;
+        margin: 0 auto;
+      }
+      header {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        gap: 1rem;
+        margin-bottom: 1.25rem;
+        flex-wrap: wrap;
+      }
+      hgroup h1 { margin-bottom: 0; }
+      headeria nav, header nav ul { margin: 0; }
+      nav a { cursor: pointer; }
+      .tab-content { display: none; }
+      .tab-content.active { display: block; }
+      .muted, .muted a { color: var(--pico-muted-color); }
+      .inline-grid { display: flex; gap: 0.5rem; align-items: flex-end; flex-wrap: wrap; margin-bottom: 0.5rem; }
+      .inline-grid select { width: auto; }
+      .inline-grid input[type="text"] { flex: 1; min-width: 240px; }
+      .score-badge { font-weight: 700; white-space: nowrap; }
+      .verdict-chip {
+        display: inline-block;
+        padding: 1px 6px;
+        border-radius: 4px;
+        font-size: 0.78rem;
+        font-weight: 600;
+      }
+      .tone-excellent { background: #2e7d32; color: #fff; }
+      .tone-good { background: #66bb6a; color: #fff; }
+      .tone-fair { background: #f9a825; color: #222; }
+      .tone-poor { background: #e53935; color: #fff; }
+      .tone-muted { background: #90a4ae; color: #fff; }
+      table th.sortable { cursor: pointer; user-select: none; }
+      th.sortable::after { content: '↕'; opacity: 0.4; margin-left: 3px; }
+      th.sortable.asc::after { content: '▲'; opacity: 0.9; }
+      th.sortable.desc::after { content: '▼'; opacity: 0.9; }
+      .queue-bar { display: flex; align-items: center; gap: 0.6rem; margin: 0.4rem 0 0.9rem; font-size: 0.85rem; }
+      .progress-track { flex: 1; height: 8px; background: var(--pico-card-background-color, #eaecec); border-radius: 4px; overflow: hidden; }
+      .progress-fill { height: 100%; width: 0; background: #f5a623; transition: width 0.3s ease; }
+      .detail-drawer { margin-top: 1rem; }
+      .detail-drawer h3 { margin-top: 0; }
+      .product-grid {
+        display: grid;
+        grid-template-columns: repeat(auto-fill, minmax(220px, 1fr));
+        gap: 0.75rem;
+      }
+      .product-card { padding: 0.75rem; border: 1px solid var(--pico-card-border-color, #d5d9d9); border-radius: 8px; font-size: 0.85rem; }
+      .product-card h4 { margin: 0 0 0.4rem; font-size: 0.92rem; }
+      .product-card .meta { margin: 0.2rem 0; color: var(--pico-muted-color); }
+      .ai-output { white-space: pre-wrap; background: var(--pico-card-background-color, #fafafa); padding: 0.9rem; border-radius: 8px; font-size: 0.88rem; }
+      .pill-row { display: flex; gap: 0.4rem; flex-wrap: wrap; margin: 0.5rem 0; }
+      .pill { background: #f5d9a3; padding: 2px 8px; border-radius: 10px; font-size: 0.8rem; color: #222; }
+      .loading { opacity: 0.6; }
+      .suggestions-panel .source-tag { font-size: 0.7rem; text-transform: uppercase; letter-spacing: 0.4px; background: #e3e6ed; border-radius: 3px; padding: 1px 5px; }
+    </style>
+  </head>
+  <body>
+    <header>
+      <hgroup>
+        <h1>KDP Copilot</h1>
+        <p class="muted">Amazon KDP Niche &amp; Keyword Research — Productor-style scoring + Gemini AI</p>
+      </hgroup>
+      <nav>
+        <ul>
+          <li><a data-view="explorer" class="active">Explorer</a></li>
+          <li><a data-view="suggestions">Suggestions</a></li>
+          <li><a data-view="settings">Settings</a></li>
+        </ul>
+      </nav>
+    </header>
+
+    <main>
+      <section id="view-explorer" class="tab-content active">
+        <div class="inline-grid">
+          <input id="seed-input" type="text" placeholder="Seed keyword, e.g. 'low carb cookbook'" />
+          <div>
+            <label for="market-select" class="muted" style="font-size: .8rem;">Market</label>
+            <select id="market-select"></select>
+          </div>
+          <button id="go-btn">Expand &amp; Auto-Scrape</button>
+          <button id="suggest-btn" class="secondary outline">Fetch Autocomplete</button>
+          <button id="scrape-all-btn" class="secondary outline">Scrape Unscraped</button>
+          <button id="export-btn" class="secondary">Export CSV</button>
+          <button id="refresh-btn" class="secondary outline">Refresh</button>
+        </div>
+
+        <div id="queue-bar" class="queue-bar">
+          <span id="queue-status" class="muted">Idle</span>
+          <div class="progress-track"><div id="queue-fill" class="progress-fill"></div></div>
+          <button id="pause-btn" class="contrast outline" style="width:auto; margin:0; font-size:.8rem; padding:2px 8px;">Pause</button>
+        </div>
+
+        <div id="status" class="muted" style="margin-bottom:0.75rem;"></div>
+
+        <article class="detail-drawer" id="detail-drawer" hidden></article>
+
+        <article>
+          <table id="keywords-table">
+            <thead>
+              <tr>
+                <th>Keyword</th>
+                <th>Mkt</th>
+                <th class="sortable" data-sort="score">Score</th>
+                <th class="sortable" data-sort="demand">Demand</th>
+                <th class="sortable" data-sort="competition">Comp.</th>
+                <th class="sortable" data-sort="margin">Margin</th>
+                <th class="sortable" data-sort="confidence">Conf.</th>
+                <th>Est. Sales</th>
+                <th class="sortable" data-sort="scrapedAt">Scraped</th>
+                <th>Actions</th>
+              </tr>
+            </thead>
+            <tbody id="keywords-body">
+              <tr><td colspan="10" class="muted">No keywords yet. Browse Amazon or expand a seed to get started.</td></tr>
+            </tbody>
+          </table>
+        </article>
+      </section>
+
+      <section id="view-suggestions" class="tab-content suggestions-panel">
+        <div class="inline-grid">
+          <input id="suggest-seed" type="text" placeholder="Keyword to pull Amazon + Google autocomplete for…" />
+          <button id="suggest-go" class="secondary">Fetch Suggested Keywords</button>
+          <button id="suggest-expand" class="secondary outline">Expand From All Suggestions</button>
+          <button id="suggest-clear" class="secondary outline">Clear Suggestions</button>
+        </div>
+        <div id="suggest-status" class="muted" style="margin-bottom:0.75rem;"></div>
+        <article>
+          <table id="suggest-table">
+            <thead>
+              <tr>
+                <th>Keyword</th>
+                <th>Source</th>
+                <th>Market</th>
+                <th>Score</th>
+                <th>Collected</th>
+                <th>Actions</th>
+              </tr>
+            </thead>
+            <tbody id="suggest-body">
+              <tr><td colspan="6" class="muted">No suggestions yet. Autocomplete seeds populate this list.</td></tr>
+            </tbody>
+          </table>
+        </article>
+      </section>
+
+      <section id="view-settings" class="tab-content">
+        <article>
+          <h2>Settings</h2>
+          <label for="api-key">Gemini API Key</label>
+          <input id="api-key" type="password" placeholder="Paste your Google AI (Gemini) API key" />
+          <p class="muted" style="font-size:.85rem;">
+            Get a key at
+            <a href="https://aistudio.google.com/apikey" target="_blank" rel="noreferrer">Google AI Studio</a>.
+            Without a key, expansion falls back to live Amazon + Google autocomplete.
+          </p>
+          <label for="model-select">Gemini Model</label>
+          <select id="model-select"></select>
+          <div class="grid" style="grid-template-columns: repeat(2, 1fr);">
+            <div>
+              <label for="market-default">Default Market</label>
+              <select id="market-default"></select>
+            </div>
+            <div>
+              <label for="scraped-pages">SERP Pages to Scrape</label>
+              <select id="scraped-pages">
+                <option value="1">1</option>
+                <option value="2">2</option>
+                <option value="3">3</option>
+              </select>
+            </div>
+          </div>
+          <div class="grid" style="grid-template-columns: repeat(3, 1fr);">
+            <label>
+              <input type="checkbox" id="opt-autocomplete" checked />
+              Amazon autocomplete
+            </label>
+            <label>
+              <input type="checkbox" id="opt-google" checked />
+              Google suggest
+            </label>
+            <label>
+              <input type="checkbox" id="opt-panel" checked />
+              SERP research panel
+            </label>
+          </div>
+          <button id="save-settings-btn">Save Settings</button>
+          <div id="settings-status" class="muted"></div>
+        </article>
+      </section>
+    </main>
+
+    <script type="module" src="app.js"></script>
+  </body>
+</html>

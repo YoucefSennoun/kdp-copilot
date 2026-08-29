@@ -1,0 +1,84 @@
+{
+  "manifest_version": 3,
+  "name": "KDP Copilot",
+  "version": "0.2.0",
+  "description": "Amazon KDP Niche & Keyword Research Copilot (Productor-style SERP panel + Gemini AI)",
+  "permissions": ["storage", "tabs", "scripting", "alarms"],
+  "host_permissions": [
+    "https://www.amazon.com/*",
+    "https://www.amazon.co.uk/*",
+    "https://www.amazon.de/*",
+    "https://www.amazon.fr/*",
+    "https://www.amazon.it/*",
+    "https://www.amazon.es/*",
+    "https://www.amazon.ca/*",
+    "https://www.amazon.co.jp/*",
+    "https://www.amazon.com.mx/*",
+    "https://www.amazon.br/*",
+    "https://www.amazon.in/*",
+    "https://completion.amazon.com/*",
+    "https://suggestqueries.google.com/*",
+    "https://generativelanguage.googleapis.com/*"
+  ],
+  "background": {
+    "service_worker": "src/background/index.js",
+    "type": "module"
+  },
+  "action": {
+    "default_title": "Open KDP Copilot Dashboard"
+  },
+  "commands": {
+    "kdp-research-selection-us": {
+      "description": "Research selected text on Amazon US (Books)",
+      "suggested_key": { "default": "Alt+Shift+1", "mac": "Alt+Shift+1" }
+    },
+    "kdp-research-selection-uk": {
+      "description": "Research selected text on Amazon UK (Books)"
+    },
+    "kdp-research-selection-de": {
+      "description": "Research selected text on Amazon DE (Books)",
+      "suggested_key": { "default": "Alt+Shift+3", "mac": "Alt+Shift+3" }
+    },
+    "kdp-research-selection-fr": {
+      "description": "Research selected text on Amazon FR (Books)"
+    }
+  },
+  "content_scripts": [
+    {
+      "matches": [
+        "https://www.amazon.com/s*",
+        "https://www.amazon.co.uk/s*",
+        "https://www.amazon.de/s*",
+        "https://www.amazon.fr/s*",
+        "https://www.amazon.it/s*",
+        "https://www.amazon.es/s*",
+        "https://www.amazon.ca/s*",
+        "https://www.amazon.co.jp/s*",
+        "https://www.amazon.com.mx/s*",
+        "https://www.amazon.br/s*"
+      ],
+      "js": ["src/content/serp-parser.js"],
+      "css": ["src/content/serp-panel.css"],
+      "run_at": "document_idle"
+    },
+    {
+      "matches": [
+        "https://www.amazon.com/dp/*",
+        "https://www.amazon.co.uk/dp/*",
+        "https://www.amazon.de/dp/*",
+        "https://www.amazon.fr/dp/*",
+        "https://www.amazon.it/dp/*",
+        "https://www.amazon.es/dp/*",
+        "https://www.amazon.ca/dp/*",
+        "https://www.amazon.co.jp/dp/*",
+        "https://www.amazon.com.mx/dp/*",
+        "https://www.amazon.com/gp/product/*",
+        "https://www.amazon.co.uk/gp/product/*",
+        "https://www.amazon.de/gp/product/*"
+      ],
+      "js": ["src/content/product-parser.js"],
+      "run_at": "document_idle"
+    }
+  ],
+  "icons": {}
+}

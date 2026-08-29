@@ -1,0 +1,182 @@
+const DB_NAME = 'kdp-copilot';
+const DB_VERSION = 3;
+
+const STORES = {
+  keywords: { keyPath: 'keyword' },
+  suggestions: { keyPath: 'id' },
+  analyses: { keyPath: 'keyword' },
+  scrapes: { keyPath: 'id', autoIncrement: true }
+};
+
+let dbPromise = null;
+
+export function openDB() {
+  if (dbPromise) return dbPromise;
+
+  dbPromise = new Promise((resolve, reject) => {
+    const request = indexedDB.open(DB_NAME, DB_VERSION);
+
+    request.onupgradeneeded = (event) => {
+      const db = event.target.result;
+      Object.entries(STORES).forEach(([name, opts]) => {
+        if (!db.objectStoreNames.contains(name)) {
+          db.createObjectStore(name, { ...opts });
+        }
+      });
+    };
+
+    request.onsuccess = () => resolve(request.result);
+    request.onerror = () => reject(request.error);
+  });
+
+  return dbPromise;
+}
+
+async function withStore(storeName, mode, fn) {
+  const db = await openDB();
+  return new Promise((resolve, reject) => {
+    const tx = db.transaction(storeName, mode);
+    const store = tx.objectStore(storeName);
+    const request = fn(store);
+    request.onsuccess = () => resolve(request.result);
+    request.onerror = () => reject(request.error);
+  });
+}
+
+async function withTx(storeName, mode, fn) {
+  const db = await openDB();
+  return new Promise((resolve, reject) => {
+    const tx = db.transaction(storeName, mode);
+    const store = tx.objectStore(storeName);
+    fn(store);
+    tx.oncomplete = () => resolve();
+    tx.onerror = () => reject(tx.error);
+  });
+}
+
+// ---- Keywords ----
+
+export async function putKeyword(record) {
+  return withStore('keywords', 'readwrite', (store) => store.put(record));
+}
+
+export async function putKeywords(records) {
+  return withTx('keywords', 'readwrite', (store) => records.forEach((r) => store.put(r)));
+}
+
+export async function getKeyword(keyword) {
+  return withStore('keywords', 'readonly', (store) => store.get(keyword));
+}
+
+export async function getAllKeywords() {
+  return withStore('keywords', 'readonly', (store) => store.getAll());
+}
+
+export async function getKeywordsByMarket(marketCode) {
+  const all = await getAllKeywords();
+  return all.filter((k) => k.market === marketCode);
+}
+
+export async function deleteKeyword(keyword) {
+  return withTx('keywords', 'readwrite', (store) => store.delete(keyword));
+}
+
+export async function clearKeywords() {
+  return withTx('keywords', 'readwrite', (store) => store.clear());
+}
+
+// ---- Suggestions (Amazon + Google autocomplete, alphabet soup) ----
+
+const SUGGESTION_TTL = 1000 * 60 * 60 * 24 * 14; // 14 days
+
+export async function putSuggestion(id, data) {
+  return withStore('suggestions', 'readwrite', (store) =>
+    store.put({ id, createdAt: Date.now(), ...data })
+  );
+}
+
+export async function putSuggestions(list) {
+  return withTx('suggestions', 'readwrite', (store) =>
+    list.forEach((r) => store.put({ id: r.id, createdAt: Date.now(), ...r }))
+  );
+}
+
+export async function getSuggestion(id) {
+  return withStore('suggestions', 'readonly', (store) => store.get(id));
+}
+
+export async function getAllSuggestions() {
+  return withStore('suggestions', 'readonly', (store) => store.getAll());
+}
+
+export async function clearSuggestionById(id) {
+  return withTx('suggestions', 'readwrite', (store) => store.delete(id));
+}
+
+export async function clearSuggestions() {
+  return withTx('suggestions', 'readwrite', (store) => store.clear());
+}
+
+export async function pruneSuggestions() {
+  const all = await getAllSuggestions();
+  const stale = all.filter((s) => Date.now() - (s.createdAt || 0) > SUGGESTION_TTL);
+  if (stale.length) {
+    await withTx('suggestions', 'readwrite', (store) =>
+      stale.forEach((s) => store.delete(s.id))
+    );
+  }
+  return stale.length;
+}
+
+// ---- AI analyses ----
+
+export async function putAnalysis(keyword, analysis) {
+  return withStore('analyses', 'readwrite', (store) =>
+    store.put({ keyword, analyzedAt: Date.now(), ...analysis })
+  );
+}
+
+export async function getAnalysis(keyword) {
+  return withStore('analyses', 'readonly', (store) => store.get(keyword));
+}
+
+// ---- Scrape history ----
+
+export async function addScrape(record) {
+  return withStore('scrapes', 'readwrite', (store) => store.add(record));
+}
+
+// ---- Settings ----
+
+const DEFAULT_SETTINGS = {
+  apiKey: '',
+  model: 'gemini-3.6-flash',
+  market: 'us',
+  autocompleteEnabled: true,
+  googleSuggestEnabled: true,
+  scrapedPages: 1,
+  panelVisible: true,
+  panelAutoAnalyze: false
+};
+
+export async function getSettings() {
+  return new Promise((resolve) => {
+    chrome.storage.local.get(['kdpSettings'], (result) => {
+      const stored = result.kdpSettings || {};
+      const merged = { ...DEFAULT_SETTINGS, ...stored };
+      // Drop deprecated model IDs saved by older builds (e.g. gemini-2.0-flash).
+      if (/^gemini-[12]\.\d/.test(merged.model || '')) {
+        merged.model = DEFAULT_SETTINGS.model;
+      }
+      resolve(merged);
+    });
+  });
+}
+
+export async function saveSettings(settings) {
+  const current = await getSettings();
+  const merged = { ...current, ...settings };
+  return new Promise((resolve) => {
+    chrome.storage.local.set({ kdpSettings: merged }, resolve);
+  });
+}
