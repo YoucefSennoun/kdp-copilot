@@ -12,6 +12,7 @@ import {
   clearSuggestions,
   pruneSuggestions,
   putAnalysis,
+  clearAnalyses,
   getSettings,
   saveSettings
 } from '../lib/storage.js';
@@ -143,6 +144,12 @@ async function handleMessage(message, sender = {}) {
       return deleteKeyword(message.keyword);
     case 'CLEAR_KEYWORDS':
       return clearKeywords();
+    case 'CLEAR_ALL':
+      scrapeQueue.abort();
+      await clearKeywords();
+      await clearSuggestions();
+      await clearAnalyses();
+      return true;
 
     // Suggestions (Amazon + Google autocomplete)
     case 'GET_SUGGESTIONS':

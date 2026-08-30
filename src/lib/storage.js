@@ -140,6 +140,10 @@ export async function getAnalysis(keyword) {
   return withStore('analyses', 'readonly', (store) => store.get(keyword));
 }
 
+export async function clearAnalyses() {
+  return withTx('analyses', 'readwrite', (store) => store.clear());
+}
+
 // ---- Scrape history ----
 
 export async function addScrape(record) {

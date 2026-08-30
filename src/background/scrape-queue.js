@@ -75,6 +75,23 @@ class ScrapeQueue {
     this._emit();
   }
 
+  /**
+   * Hard reset: drop queued tasks, close every in-flight scrape tab,
+   * and return to the idle state. Used by "Start over".
+   */
+  abort() {
+    this.queue.length = 0;
+    this.pendingTabs.forEach((pending, tabId) => {
+      clearTimeout(pending.timer);
+      this._safeClose(tabId);
+      pending.resolve({ ok: false, error: 'aborted' });
+    });
+    this.pendingTabs.clear();
+    this.running = false;
+    this.status = STATUS.IDLE;
+    this._emit();
+  }
+
   resume() {
     if (this.status !== STATUS.PAUSED) return;
     this.running = false;

@@ -24,6 +24,7 @@ export function loadExplorerView() {
     document.getElementById('scrape-all-btn').onclick = handleScrapeAll;
     document.getElementById('export-btn').onclick = exportCsv;
     document.getElementById('refresh-btn').onclick = refresh;
+    document.getElementById('start-over-btn').onclick = startOver;
     document.getElementById('pause-btn').onclick = () => {
       const btn = document.getElementById('pause-btn');
       if (btn.dataset.paused === 'true') {
@@ -225,6 +226,26 @@ async function handleScrapeAll() {
     });
     if (!res.ok) throw new Error(res.error);
     setStatus(`Queued ${res.result.count} keywords for scraping.`);
+    refreshQueueBar();
+  } catch (err) {
+    setStatus(`Error: ${err.message}`);
+  }
+}
+
+async function startOver() {
+  const confirmed = confirm(
+    'Start over?\n\nThis permanently deletes all researched keywords, suggestions and AI analyses ' +
+    'and aborts any running scrape. Your settings are kept.'
+  );
+  if (!confirmed) return;
+
+  setStatus('Clearing workspace…');
+  try {
+    const res = await chrome.runtime.sendMessage({ type: 'CLEAR_ALL' });
+    if (!res.ok) throw new Error(res.error);
+    rows = [];
+    setStatus('Cleared. Ready for a fresh niche search.');
+    render();
     refreshQueueBar();
   } catch (err) {
     setStatus(`Error: ${err.message}`);
