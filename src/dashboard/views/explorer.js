@@ -2,6 +2,7 @@ import { loadDetailView } from './detail.js';
 import { populateMarketSelects } from './../app.js';
 
 let rows = [];
+let legals = {};
 let sortField = 'score';
 let sortDir = 'desc';
 let loadedMarket = null;
@@ -65,6 +66,11 @@ async function refresh() {
     const res = await chrome.runtime.sendMessage({ type: 'GET_KEYWORDS' });
     if (!res.ok) throw new Error(res.error);
     rows = res.result || [];
+    const legalRes = await chrome.runtime.sendMessage({ type: 'GET_ALL_LEGAL' });
+    if (legalRes.ok) {
+      legals = {};
+      (legalRes.result || []).forEach((l) => { legals[l.keyword] = l; });
+    }
     const settingsRes = await chrome.runtime.sendMessage({ type: 'GET_SETTINGS' });
     if (settingsRes.ok) {
       loadedMarket = loadedMarket || settingsRes.result.market || 'us';
@@ -129,8 +135,12 @@ function render() {
   body.innerHTML = sorted
     .map((r) => {
       const ver = r.verdict || {};
+      const legal = legals[r.keyword];
+      const legalBadge = legal && legal.risk
+        ? `<span class="legal-badge ${escapeAttr(legal.risk)}" title="${escapeAttr(legal.verdict || '')}">⚖ ${escapeHtml(legal.risk)}</span>`
+        : '';
       return `<tr>
-        <td>${escapeHtml(r.keyword)}</td>
+        <td>${escapeHtml(r.keyword)}${legalBadge}</td>
         <td class="muted">${escapeHtml((r.market || 'us').toUpperCase())}</td>
         <td class="score-badge">${fmt(r.score)}</td>
         <td>${fmtPct(r.demand)}</td>
@@ -142,6 +152,7 @@ function render() {
         <td>
           <button data-action="detail" data-keyword="${escapeAttr(r.keyword)}" class="secondary outline">Detail</button>
           <button data-action="ai" data-keyword="${escapeAttr(r.keyword)}" class="secondary outline">AI</button>
+          <button data-action="legal" data-keyword="${escapeAttr(r.keyword)}" class="secondary outline">Legal</button>
           <button data-action="delete" data-keyword="${escapeAttr(r.keyword)}" class="secondary outline">Delete</button>
         </td>
       </tr>`;
@@ -154,6 +165,9 @@ function render() {
   body.querySelectorAll('[data-action="ai"]').forEach((btn) => {
     btn.onclick = () => handleAi(btn.dataset.keyword);
   });
+  body.querySelectorAll('[data-action="legal"]').forEach((btn) => {
+    btn.onclick = () => handleLegal(btn.dataset.keyword);
+  });
   body.querySelectorAll('[data-action="delete"]').forEach((btn) => {
     btn.onclick = () => removeKeyword(btn.dataset.keyword);
   });
@@ -163,6 +177,76 @@ async function showDetail(keyword) {
   const res = await chrome.runtime.sendMessage({ type: 'GET_KEYWORD', keyword });
   if (!res.ok || !res.result) return setStatus(`Error: ${res.error || 'not found'}`);
   await loadDetailView(res.result);
+}
+
+async function handleLegal(keyword) {
+  setStatus(`Checking "${keyword}" for trademark/copyright issues…`);
+  try {
+    const res = await chrome.runtime.sendMessage({ type: 'CHECK_TRADEMARK', keyword });
+    if (!res.ok) {
+      setStatus(`Legal check failed: ${res.error}`);
+      return;
+    }
+    legals[keyword] = res.result;
+    setStatus(`Legal screen saved${res.result.ai ? ' (AI)' : ' (heuristic)'}.`);
+    openLegalModal(res.result);
+    render();
+  } catch (err) {
+    setStatus(`Legal check error: ${err.message}`);
+  }
+}
+
+function openLegalModal(legal) {
+  const riskClass = ['low', 'medium', 'high'].includes(legal.risk) ? legal.risk : 'medium';
+  const flags = (legal.flagged || []).map((f) => `
+    <div class="legal-flag">
+      <b>${escapeHtml(f.term)}</b>
+      <span class="muted"> · ${escapeHtml(f.type)}</span>${f.owner ? ` <span class="muted">· ${escapeHtml(f.owner)}</span>` : ''}
+      <div>${escapeHtml(f.why || '')}</div>
+    </div>`).join('');
+
+  document.getElementById('legal-content').innerHTML = `
+    <p><span class="legal-risk ${riskClass}">${escapeHtml(legal.risk)} risk</span>
+      <span class="muted" style="margin-left:.4rem; font-size:.8rem;">
+        ${legal.ai ? 'Gemini AI review' : 'local heuristic screen'} · ${fmtDate(legal.checkedAt)}
+      </span></p>
+    <p>${escapeHtml(legal.verdict || '')}</p>
+    ${flags ? `<h3 style="font-size:1rem;">Flagged terms (${flags.length ? (legal.flagged || []).length : 0})</h3>${flags}` : '<p class="muted">No protected terms flagged.</p>'}
+    ${legal.safeKeyword && legal.safeKeyword !== legal.keyword ? `
+      <div class="legal-safekeyword"><b>Compliant alternative:</b> ${escapeHtml(legal.safeKeyword)}</div>` : ''}
+    ${(legal.notes || []).map((n) => `<p class="legal-note">• ${escapeHtml(n)}</p>`).join('')}
+    <div style="display:flex; gap:.5rem; margin-top:1rem;">
+      <button id="legal-rerun" class="secondary outline">Re-check with AI</button>
+      <button id="legal-close" class="contrast outline">Close</button>
+    </div>`;
+
+  const keyword = legal.keyword;
+  document.getElementById('legal-rerun').onclick = async () => {
+    const btn = document.getElementById('legal-rerun');
+    btn.disabled = true;
+    btn.textContent = 'Checking…';
+    const res = await chrome.runtime.sendMessage({ type: 'CHECK_TRADEMARK', keyword });
+    btn.disabled = false;
+    btn.textContent = 'Re-check with AI';
+    if (res.ok) {
+      legals[keyword] = res.result;
+      openLegalModal(res.result);
+      render();
+    } else {
+      document.getElementById('legal-content').insertAdjacentHTML('beforeend',
+        `<p class="legal-note" style="color:#e53935;">Re-check failed: ${escapeHtml(res.error)}</p>`);
+    }
+  };
+  document.getElementById('legal-close').onclick = () => {
+    document.getElementById('legal-modal').hidden = true;
+  };
+  document.getElementById('legal-modal').hidden = false;
+  document.addEventListener('keydown', function esc(e) {
+    if (e.key === 'Escape') {
+      document.getElementById('legal-modal').hidden = true;
+      document.removeEventListener('keydown', esc);
+    }
+  });
 }
 
 async function handleAi(keyword) {

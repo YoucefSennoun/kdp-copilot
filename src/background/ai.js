@@ -203,7 +203,130 @@ export async function generateListing({ apiKey, niche, keywordRecord }) {
 }
 
 // ---------------------------------------------------------------------------
-// 4. Local, dependency-free fallbacks (no API key required)
+// 4. Trademark & copyright screen: does this niche collide with protected IP?
+// ---------------------------------------------------------------------------
+
+function buildLegalPrompt(keyword, keywordRecord) {
+  const leader = (keywordRecord?.metrics?.sample || keywordRecord?.sample || [])[0];
+  return [
+    `You are an Amazon KDP compliance advisor for indie authors. Analyze the niche "${keyword}"`,
+    `for potential US trademark and copyright problems a self-publisher could face.`,
+    `Look for: registered brands used generically, movie/TV/game characters, franchise names,`,
+    `celebrity names, artist/song titles, publisher brands, or phrases protected by famous marks.`,
+    leader ? `A top listing in this niche is "${leader.title}".` : '',
+    `Return JSON exactly in this shape:`,
+    JSON.stringify({
+      risk: 'low | medium | high',
+      safe: true,
+      verdict: 'one-sentence plain-English explanation a non-lawyer can act on',
+      flagged: [
+        {
+          term: 'the specific word/phrase that is risky',
+          type: 'trademark | copyright | celebrity | franchise | brand',
+          owner: 'who you think owns the rights, if known',
+          why: 'why publishing a book on this could be a problem'
+        }
+      ],
+      safeKeyword: 'a reworded, compliant alternative niche targeting the same buyer intent',
+      notes: ['2-3 practical actions or caveats']
+    }),
+    `An empty "flagged" array means the niche looks clean. Only output the JSON object.`
+  ].filter(Boolean).join('\n');
+}
+
+export async function checkTrademark({ apiKey, keyword, keywordRecord }) {
+  const prompt = buildLegalPrompt(keyword, keywordRecord);
+  const data = await callGemini({ apiKey, prompt });
+  return { ...data, ai: true, keyword };
+}
+
+// Keyless fallback: a small, conservative list of widely protected terms.
+// NOT a legal database — it only catches obvious collisions.
+const PROTECTED_TERMS = [
+  { term: 'disney', type: 'trademark', owner: 'The Walt Disney Company' },
+  { term: 'pixar', type: 'trademark', owner: 'Pixar / Disney' },
+  { term: 'marvel', type: 'trademark', owner: 'Marvel Entertainment' },
+  { term: 'dc comics', type: 'trademark', owner: 'DC Comics' },
+  { term: 'harry potter', type: 'trademark', owner: 'J.K. Rowling / Warner Bros.' },
+  { term: 'pokemon', type: 'trademark', owner: 'The Pokémon Company' },
+  { term: 'star wars', type: 'trademark', owner: 'Lucasfilm / Disney' },
+  { term: 'star trek', type: 'trademark', owner: 'Paramount' },
+  { term: 'lego', type: 'trademark', owner: 'LEGO Group' },
+  { term: 'barbie', type: 'trademark', owner: 'Mattel' },
+  { term: 'netflix', type: 'trademark', owner: 'Netflix Inc.' },
+  { term: 'nike', type: 'trademark', owner: 'Nike Inc.' },
+  { term: 'adidas', type: 'trademark', owner: 'adidas AG' },
+  { term: 'coca-cola', type: 'trademark', owner: 'The Coca-Cola Company' },
+  { term: 'mcdonald', type: 'trademark', owner: 'McDonald\'s Corp.' },
+  { term: 'starbucks', type: 'trademark', owner: 'Starbucks Corp.' },
+  { term: 'apple', type: 'trademark', owner: 'Apple Inc.' },
+  { term: 'google', type: 'trademark', owner: 'Google LLC' },
+  { term: 'microsoft', type: 'trademark', owner: 'Microsoft Corp.' },
+  { term: 'amazon prime', type: 'trademark', owner: 'Amazon.com Inc.' },
+  { term: 'game of thrones', type: 'copyright', owner: 'George R.R. Martin / HBO' },
+  { term: 'lord of the rings', type: 'trademark', owner: 'The Tolkien Estate / Middle-earth Enterprises' },
+  { term: 'the hobbit', type: 'trademark', owner: 'The Tolkien Estate' },
+  { term: 'sherlock holmes', type: 'copyright', owner: 'Conan Doyle Estate (US, until 2049)' },
+  { term: 'doctor who', type: 'trademark', owner: 'BBC' },
+  { term: 'halo', type: 'trademark', owner: 'Microsoft / 343 Industries' },
+  { term: 'minecraft', type: 'trademark', owner: 'Mojang / Microsoft' },
+  { term: 'fortnite', type: 'trademark', owner: 'Epic Games' },
+  { term: 'roblox', type: 'trademark', owner: 'Roblox Corp.' },
+  { term: 'mario', type: 'trademark', owner: 'Nintendo' },
+  { term: 'zelda', type: 'trademark', owner: 'Nintendo' },
+  { term: 'super mario', type: 'trademark', owner: 'Nintendo' },
+  { term: 'sonic the hedgehog', type: 'trademark', owner: 'Sega' },
+  { term: 'peppa pig', type: 'trademark', owner: 'Hasbro / Entertainment One' },
+  { term: 'bluey', type: 'trademark', owner: 'BBC Studios' },
+  { term: 'paw patrol', type: 'trademark', owner: 'Spin Master / Nickelodeon' },
+  { term: 'elsa', type: 'trademark', owner: 'Disney (Frozen)' },
+  { term: 'frozen', type: 'trademark', owner: 'Disney' },
+  { term: 'spiderman', type: 'trademark', owner: 'Marvel / Sony' },
+  { term: 'batman', type: 'trademark', owner: 'DC / Warner Bros.' },
+  { term: 'superman', type: 'trademark', owner: 'DC / Warner Bros.' },
+  { term: 'wonka', type: 'trademark', owner: 'Roald Dahl Estate / Warner Bros.' },
+  { term: 'dr. seuss', type: 'trademark', owner: 'Dr. Seuss Enterprises' },
+  { term: 'eric carle', type: 'copyright', owner: 'Eric Carle Estate' },
+  { term: 'cocomelon', type: 'trademark', owner: 'Moonbug Entertainment' },
+  { term: 'kanye', type: 'celebrity', owner: 'Kanye West' },
+  { term: 'taylor swift', type: 'celebrity', owner: 'Taylor Swift' },
+  { term: 'beyonce', type: 'celebrity', owner: 'Beyoncé Knowles-Carter' },
+  { term: 'rihanna', type: 'celebrity', owner: 'Rihanna' },
+  { term: 'the beatles', type: 'trademark', owner: 'Apple Corps / Sony' }
+];
+
+export async function localTrademarkSweep(keyword, keywordRecord) {
+  const text = `${keywordRecord?.title || keyword} ${keywordRecord?.description || ''} ${keyword}`.toLowerCase();
+  const flagged = PROTECTED_TERMS.filter((p) => text.includes(p.term))
+    .map((p) => ({ term: p.term, type: p.type, owner: p.owner, why: `The niche contains the protected name "${p.term}".` }))
+    .slice(0, 8);
+
+  if (flagged.length) {
+    return {
+      keyword,
+      ai: false,
+      risk: flagged.length > 2 ? 'high' : 'medium',
+      safe: false,
+      verdict: `Heuristic screen (no API key): flagged ${flagged.length} protected term${flagged.length === 1 ? '' : 's'}. Verify with a trademark attorney before publishing.`,
+      flagged,
+      safeKeyword: keyword,
+      notes: ['This is a local keyword-match check, not a legal opinion. Add your Gemini API key for a full AI review.']
+    };
+  }
+  return {
+    keyword,
+    ai: false,
+    risk: 'low',
+    safe: true,
+    verdict: 'Heuristic screen (no API key): no common protected terms found in the keyword. Review with AI for complete safety.',
+    flagged: [],
+    safeKeyword: keyword,
+    notes: ['Add your Gemini API key in Settings for a thorough AI trademark and copyright review.']
+  };
+}
+
+// ---------------------------------------------------------------------------
+// 5. Local, dependency-free fallbacks (no API key required)
 // ---------------------------------------------------------------------------
 
 function matchesSeed(seed, word) {

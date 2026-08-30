@@ -1,10 +1,11 @@
 const DB_NAME = 'kdp-copilot';
-const DB_VERSION = 3;
+const DB_VERSION = 4;
 
 const STORES = {
   keywords: { keyPath: 'keyword' },
   suggestions: { keyPath: 'id' },
   analyses: { keyPath: 'keyword' },
+  legals: { keyPath: 'keyword' },
   scrapes: { keyPath: 'id', autoIncrement: true }
 };
 
@@ -142,6 +143,26 @@ export async function getAnalysis(keyword) {
 
 export async function clearAnalyses() {
   return withTx('analyses', 'readwrite', (store) => store.clear());
+}
+
+// ---- Trademark / copyright screens ----
+
+export async function putLegal(keyword, legal) {
+  return withStore('legals', 'readwrite', (store) =>
+    store.put({ keyword, checkedAt: Date.now(), ...legal })
+  );
+}
+
+export async function getLegal(keyword) {
+  return withStore('legals', 'readonly', (store) => store.get(keyword));
+}
+
+export async function getAllLegals() {
+  return withStore('legals', 'readonly', (store) => store.getAll());
+}
+
+export async function clearLegals() {
+  return withTx('legals', 'readwrite', (store) => store.clear());
 }
 
 // ---- Scrape history ----

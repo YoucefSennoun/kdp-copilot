@@ -13,6 +13,10 @@ import {
   pruneSuggestions,
   putAnalysis,
   clearAnalyses,
+  putLegal,
+  getLegal,
+  getAllLegals,
+  clearLegals,
   getSettings,
   saveSettings
 } from '../lib/storage.js';
@@ -21,6 +25,8 @@ import {
   expandNicheSeeds,
   analyzeNiche,
   generateListing,
+  checkTrademark,
+  localTrademarkSweep,
   localExpandSuggestions,
   getApiKey
 } from './ai.js';
@@ -149,6 +155,7 @@ async function handleMessage(message, sender = {}) {
       await clearKeywords();
       await clearSuggestions();
       await clearAnalyses();
+      await clearLegals();
       return true;
 
     // Suggestions (Amazon + Google autocomplete)
@@ -190,6 +197,12 @@ async function handleMessage(message, sender = {}) {
       return handleAnalyzeNiche(message.keyword);
     case 'GENERATE_LISTING':
       return handleGenerateListing(message.keyword, message.niche);
+    case 'CHECK_TRADEMARK':
+      return handleCheckTrademark(message.keyword);
+    case 'GET_ALL_LEGAL':
+      return getAllLegals();
+    case 'GET_LEGAL':
+      return getLegal(message.keyword);
 
     // Settings / dashboard
     case 'GET_SETTINGS':
@@ -369,30 +382,52 @@ async function fetchSuggestions({ seed, market }) {
 export async function amazonAutocomplete(seed, marketCode) {
   const market = getMarket(marketCode);
   const url = autocompleteUrl(market.code, seed);
-  const res = await fetch(url, {
-    headers: {
-      'User-Agent':
-        'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0 Safari/537.36'
+  // Amazon's completion API occasionally bursts empty arrays (rate-limit /
+  // no-cookie contexts). Retry once with a backoff, then fail soft with [].
+  for (let attempt = 1; attempt <= 2; attempt++) {
+    const res = await fetch(url, {
+      headers: {
+        'User-Agent':
+          'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0 Safari/537.36'
+      }
+    });
+    if (!res.ok) throw new Error(`Amazon suggest ${res.status}`);
+    let data = {};
+    try {
+      data = await res.json();
+    } catch {
+      data = {};
     }
-  });
-  if (!res.ok) throw new Error(`Amazon suggest ${res.status}`);
-  const data = await res.json();
-  const words = (data.suggestions || [])
-    .filter((s) => s && s.value)
-    .map((s) => s.value);
-  if (!words.length) throw new Error('Amazon suggest: empty');
-  return words.slice(0, 11);
+    const words = (data.suggestions || [])
+      .filter((s) => s && s.value)
+      .map((s) => s.value);
+    if (words.length) return words.slice(0, 11);
+    if (attempt === 1) {
+      await new Promise((r) => setTimeout(r, 1500));
+    }
+  }
+  return [];
 }
 
 export async function googleSuggest(seed, marketCode) {
   const market = getMarket(marketCode);
   const url = googleSuggestUrl(seed, market.code);
-  const res = await fetch(url, { headers: { 'X-Chrome-UMA-Enabled': '1' } });
-  if (!res.ok) throw new Error(`Google suggest ${res.status}`);
-  const data = await res.json();
-  const words = Array.isArray(data) && Array.isArray(data[1]) ? data[1] : [];
-  if (!words.length) throw new Error('Google suggest: empty');
-  return words.slice(0, 20);
+  for (let attempt = 1; attempt <= 2; attempt++) {
+    const res = await fetch(url, { headers: { 'X-Chrome-UMA-Enabled': '1' } });
+    if (!res.ok) throw new Error(`Google suggest ${res.status}`);
+    let data = [];
+    try {
+      data = await res.json();
+    } catch {
+      data = [];
+    }
+    const words = Array.isArray(data) && Array.isArray(data[1]) ? data[1] : [];
+    if (words.length) return words.slice(0, 20);
+    if (attempt === 1) {
+      await new Promise((r) => setTimeout(r, 1500));
+    }
+  }
+  return [];
 }
 
 async function expandFromSuggestions(marketCode) {
@@ -482,6 +517,18 @@ async function handleAnalyzeNiche(keyword) {
   const analysis = await analyzeNiche({ apiKey, keyword, keywordRecord: record });
   await putAnalysis(keyword, analysis);
   return analysis;
+}
+
+async function handleCheckTrademark(keyword) {
+  const apiKey = await getApiKey();
+  const record = await getKeyword(keyword).catch(() => null);
+
+  const scan = apiKey
+    ? await checkTrademark({ apiKey, keyword, keywordRecord: record || {} })
+    : await localTrademarkSweep(keyword, record || {});
+
+  await putLegal(keyword, scan);
+  return scan;
 }
 
 async function handleGenerateListing(keyword, niche) {

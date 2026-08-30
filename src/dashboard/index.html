@@ -66,6 +66,41 @@
       .pill { background: #f5d9a3; padding: 2px 8px; border-radius: 10px; font-size: 0.8rem; color: #222; }
       .loading { opacity: 0.6; }
       .suggestions-panel .source-tag { font-size: 0.7rem; text-transform: uppercase; letter-spacing: 0.4px; background: #e3e6ed; border-radius: 3px; padding: 1px 5px; }
+      .legal-badge {
+        display: inline-block;
+        margin-left: 5px;
+        padding: 1px 6px;
+        border-radius: 4px;
+        font-size: 0.68rem;
+        font-weight: 700;
+        vertical-align: middle;
+        text-transform: uppercase;
+        letter-spacing: 0.3px;
+      }
+      .legal-badge.high { background: #e53935; color: #fff; }
+      .legal-badge.medium { background: #f9a825; color: #222; }
+      .legal-badge.low { background: #2e7d32; color: #fff; }
+      .legal-modal-backdrop {
+        position: fixed; inset: 0;
+        background: rgba(0, 0, 0, 0.45);
+        display: flex; align-items: center; justify-content: center;
+        z-index: 100;
+      }
+      .legal-modal {
+        background: var(--pico-card-background-color, #fff);
+        color: var(--pico-color, #111);
+        max-width: 580px; width: 92%;
+        border-radius: 10px; padding: 1.25rem;
+        max-height: 82vh; overflow: auto;
+      }
+      .legal-modal h2 { margin-top: 0; }
+      .legal-risk { font-weight: 700; text-transform: uppercase; letter-spacing: 0.5px; font-size: 0.85rem; }
+      .legal-risk.low { color: #2e7d32; }
+      .legal-risk.medium { color: #f9a825; }
+      .legal-risk.high { color: #e53935; }
+      .legal-flag { padding: 0.45rem 0.6rem; border-left: 3px solid #e53935; background: rgba(229, 57, 53, 0.08); border-radius: 4px; margin: 0.4rem 0; font-size: 0.88rem; }
+      .legal-safekeyword { padding: 0.5rem 0.6rem; background: rgba(46, 125, 50, 0.1); border-left: 3px solid #2e7d32; border-radius: 4px; font-size: 0.88rem; }
+      .legal-note { margin: 0.2rem 0; font-size: 0.85rem; color: var(--pico-muted-color); }
     </style>
   </head>
   <body>
@@ -204,6 +239,13 @@
         </article>
       </section>
     </main>
+
+    <div id="legal-modal" class="legal-modal-backdrop" hidden>
+      <div class="legal-modal" role="dialog" aria-modal="true">
+        <h2>Trademark &amp; Copyright Screen</h2>
+        <div id="legal-content"></div>
+      </div>
+    </div>
 
     <script type="module" src="app.js"></script>
   </body>

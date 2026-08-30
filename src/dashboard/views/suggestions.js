@@ -42,7 +42,14 @@ async function fetchForSeed(seed) {
     await chrome.runtime.sendMessage({ type: 'SAVE_SUGGESTIONS', suggestions: grouped }).catch(() => {
       // SAVE_SUGGESTIONS is added by the background router for storage only.
     });
-    showStatus(`Collected ${grouped.length} unique suggestions (${amazon.length} Amazon, ${google.length} Google).`);
+    const parts = [];
+    if (amazon.length) parts.push(`${amazon.length} Amazon`);
+    if (google.length) parts.push(`${google.length} Google`);
+    showStatus(
+      parts.length
+        ? `Collected ${grouped.length} unique suggestions (${parts.join(', ')}).`
+        : 'No suggestions returned. Amazon/Google may be rate-limiting — wait a few seconds and try again.'
+    );
     refresh();
   } catch (err) {
     showStatus(`Error: ${err.message}`);
