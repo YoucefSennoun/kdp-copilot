@@ -304,12 +304,25 @@
               Only show KDP-publishable content
             </label>
             <p class="muted" style="margin:0; align-self:center; font-size:.8rem;">
-              Filters out novels, memoirs &amp; expert non-fiction (medical, scientific, legal, academic).
+              Strict scope = Amazon's official "generally low-content" list only (journals, planners, notebooks, logbooks, prompt journals, coupon books, score cards, crafting templates, blank sheet music).
             </p>
-            <label title="Allows long-tail fiction niches like 'cozy mysteries for seniors' — generic 'novels'/'romance' stay excluded.">
-              <input type="checkbox" id="opt-niche-fiction" checked />
+            <label title="Strict scope filters to Amazon's blank-interior families. Standard scope also allows coloring books, puzzle/activity books, workbooks, guides and (if enabled) narrow-fiction niches.">
+              Content scope
+              <select id="content-scope">
+                <option value="strict">Strict — low-content only (Amazon definition)</option>
+                <option value="standard">Standard — also coloring/puzzle/workbook/guide</option>
+              </select>
+            </label>
+          </div>
+
+          <div class="grid" style="grid-template-columns: repeat(2, 1fr);">
+            <label title="Only relevant in Standard scope.">
+              <input type="checkbox" id="opt-niche-fiction" />
               Allow narrow niche fiction (e.g. cozy mysteries)
             </label>
+            <p class="muted" style="margin:0; align-self:center; font-size:.8rem;">
+              Fiction is never allowed in Strict scope.
+            </p>
           </div>
 
           <h3 style="margin-top:1.25rem;">BSR enrichment (auto product-page deep-dive)</h3>

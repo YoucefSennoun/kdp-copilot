@@ -30,6 +30,24 @@ const LOW_KIND = {
 };
 
 /**
+ * Content scope (v0.6). 'strict' = Amazon's official "generally low-content"
+ * definition ONLY: notebooks, planners, diaries/journals, prompt journals,
+ * log/tracking books, coupon books, score-card templates, crafting templates
+ * (scrapbook paper, ephemera), blank sheet music. Coloring books, puzzle
+ * books, workbooks, guides, novels, manuals and non-fiction are explicitly
+ * NOT in that list and are excluded in strict scope.
+ */
+export const CONTENT_SCOPE = {
+  STRICT: 'strict',
+  STANDARD: 'standard'
+};
+
+/** True when a classifyContentType result is a plain blank-interior niche. */
+export function isLowContentNiche(result) {
+  return !!result && result.contentType === 'low-content';
+}
+
+/**
  * KDP-friendly content signals, each ~ a kind ('low' | 'medium' | 'guide').
  * Longest/most specific phrases should come before short generic ones when
  * they share words (first match wins for the label).
@@ -75,6 +93,29 @@ export const LOW_MEDIUM_SIGNALS = [
   { phrase: 'vision board', label: 'Vision Board Book', kind: 'low' },
   { phrase: 'book of shadows', label: 'Journal', kind: 'low' },
 
+  // --- Strict low-content (Amazon's "generally low-content" list) ---
+  { phrase: 'coupon book', label: 'Coupon Book', kind: 'low' },
+  { phrase: 'coupon holder', label: 'Coupon Book', kind: 'low' },
+  { phrase: 'score card', label: 'Score Card Templates', kind: 'low' },
+  { phrase: 'scorecard', label: 'Score Card Templates', kind: 'low' },
+  { phrase: 'score cards', label: 'Score Card Templates', kind: 'low' },
+  { phrase: 'score sheet', label: 'Score Sheet', kind: 'low' },
+  { phrase: 'scoresheet', label: 'Score Sheet', kind: 'low' },
+  { phrase: 'scrapbook paper', label: 'Crafting Templates', kind: 'low' },
+  { phrase: 'scrapbooking', label: 'Crafting Templates', kind: 'low' },
+  { phrase: 'ephemera', label: 'Crafting Templates', kind: 'low' },
+  { phrase: 'card making templates', label: 'Crafting Templates', kind: 'low' },
+  { phrase: 'crafting templates', label: 'Crafting Templates', kind: 'low' },
+  { phrase: 'paper craft template', label: 'Crafting Templates', kind: 'low' },
+  { phrase: 'stencil templates', label: 'Crafting Templates', kind: 'low' },
+  { phrase: 'card making', label: 'Crafting Templates', kind: 'low' },
+  { phrase: 'blank sheet music', label: 'Blank Sheet Music', kind: 'low' },
+  { phrase: 'manuscript paper', label: 'Blank Sheet Music', kind: 'low' },
+  { phrase: 'staff paper', label: 'Blank Sheet Music', kind: 'low' },
+  { phrase: 'music manuscript', label: 'Blank Sheet Music', kind: 'low' },
+  { phrase: 'blank music paper', label: 'Blank Sheet Music', kind: 'low' },
+  { phrase: 'music writing paper', label: 'Blank Sheet Music', kind: 'low' },
+ 
   // --- Medium-content: activity / coloring / puzzle / workbook ---
   { phrase: 'coloring book', label: 'Coloring Book', kind: 'medium' },
   { phrase: 'colour book', label: 'Coloring Book', kind: 'medium' },
@@ -403,6 +444,55 @@ function dominantLowSignal(text) {
   return null;
 }
 
+/** Strict scope: only the kind==='low' candidates count. */
+function dominantStrictLowSignal(text) {
+  for (const s of LOW_MEDIUM_SIGNALS) {
+    if (s.kind === 'low' && hasPhrase(text, s.phrase)) return s;
+  }
+  return null;
+}
+
+/**
+ * Strict scope classification (v0.6). A niche qualifies ONLY if it is one of
+ * Amazon's "generally low-content" blank-interior families. Everything else —
+ * including coloring books, puzzle books, workbooks, guides, novels and
+ * non-fiction — returns high-content-excluded so no pipeline stage can keep it.
+ */
+function strictScopeResult({ kw, kwLow, titles = [], categories = [], kindleShare = null, sampleSize = 0, nTitles = 0 }) {
+  const pers = PERSONALIZED_SIGNALS.some((s) => hasPhrase(kw, s.phrase));
+  if (pers) return result('low-content', 'Personalized / name book (blank interior)', 'title-regex', 'medium', false);
+
+  const strictLow = kwLow.filter((s) => s.kind === 'low');
+  if (strictLow.length) {
+    const sig = dominantStrictLowSignal(kw);
+    return result('low-content', sig ? sig.label : 'Low-Content', 'title-regex', 'high', false);
+  }
+
+  // Title-level majority (>=3 sampled cards).
+  if (nTitles >= 3) {
+    const lowTitles = countMatches(titles, LOW_MEDIUM_SIGNALS.filter((s) => s.kind === 'low'), (t) => t);
+    const otherTitles = countMatches(titles, LOW_MEDIUM_SIGNALS.filter((s) => s.kind !== 'low'), (t) => t);
+    if (lowTitles >= Math.max(3, Math.ceil(nTitles * 0.6)) && otherTitles <= lowTitles) {
+      const sig = dominantStrictLowSignal(titles.join(' '));
+      return result('low-content', (sig && sig.label) || 'Low-Content', 'title-regex', 'medium', false);
+    }
+    if (lowTitles >= 3 && lowTitles >= Math.ceil(nTitles * 0.4)) {
+      const sig = dominantStrictLowSignal(titles.join(' '));
+      return result('low-content', (sig && sig.label) || 'Low-Content', 'title-regex', 'medium', false);
+    }
+  }
+
+  // Category breadcrumb confirming a blank-interior family.
+  const catText = (categories || []).join(' ');
+  if (catText && /journal|planner|notebook|notebooks|diary|logbook|tracking|calendar|sketch|prompt|coupon|score card|scrapbook|ephemera|manuscript|sheet music|tracker|paper$/i.test(catText)) {
+    return result('low-content', 'Category-confirmed low-content', 'category-breadcrumb', 'low', false);
+  }
+
+  // The Kindle-format tell is intentionally NOT used here: it would wrongly
+  // certify non-blank interiors. Unconfirmed => excluded (v0.6 focus rule).
+  return result('high-content-excluded', 'Not general low-content', 'scope-strict', 'high', false);
+}
+
 function pick(a, b) {
   return a == null || a === '' ? b : a;
 }
@@ -429,17 +519,29 @@ export function classifyContentType({
   categories = [],
   kindleShare = null,
   sampleSize = 0,
-  allowFiction = true
+  allowFiction = true,
+  scope = 'standard'
 } = {}) {
   const kw = normalize(keyword);
   const nTitles = (titles || []).length;
+  const isStrict = scope === CONTENT_SCOPE.STRICT;
 
   // 1. Keyword-level personalized / low / medium / guide markers — strongest.
   if (hasPhrase(kw, 'personalized') || hasPhrase(kw, 'personalised') || hasPhrase(kw, 'gift for')) {
+    if (isStrict) {
+      return result('low-content', 'Personalized / name book (blank interior)', 'title-regex', 'medium', false);
+    }
     return result('personalized', 'Personalized', 'title-regex', 'high');
   }
   const kwLow = LOW_MEDIUM_SIGNALS.filter((s) => hasPhrase(kw, s.phrase));
   const kwHigh = HIGH_CONTENT_SIGNALS.filter((s) => hasPhrase(kw, s.phrase));
+
+  // 1b. STRICT scope: only blank-interior families qualify. Everything else —
+  //     including coloring/puzzle/workbook/guides the standard scope allows —
+  //     is excluded here and can be re-held by no later stage.
+  if (isStrict) {
+    return strictScopeResult({ kw, kwLow, titles, categories, kindleShare, sampleSize, nTitles });
+  }
 
   // 2. Keyword-level high-content markers — exclude unless a STRONG
   //    low/medium content signal genuinely coexists ("clinical trial logbook"

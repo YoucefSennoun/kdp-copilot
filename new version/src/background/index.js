@@ -422,7 +422,8 @@ async function handleSerpParsed(payload, sender) {
     titles: sampleTitles,
     categories: Array.isArray(prev.categories) ? prev.categories : undefined,
     kindleShare: metrics.kindleShare ?? prev.kindleShare ?? null,
-    sampleSize: metrics.sampleSize ?? metrics.listingCount ?? sampleTitles.length
+    sampleSize: metrics.sampleSize ?? metrics.listingCount ?? sampleTitles.length,
+    scope: settings.contentScope || 'strict'
   });
   const ctFinal =
     ct.contentType === 'unknown' && prev.contentType
@@ -536,6 +537,7 @@ function enqueueEnrichment(record, settings, marketCode) {
 }
 
 async function mergeProductIntoParent(parentKeyword, payload) {
+  const settings = await getSettings();
   const parent = await getKeyword(parentKeyword);
   if (!parent) return { merged: false, reason: 'parent-missing' };
   const settings = await getSettings();
@@ -568,7 +570,7 @@ async function mergeProductIntoParent(parentKeyword, payload) {
     )
   );
   if (breadcrumbs.length) {
-    const re = classifyContentType({ keyword: '', categories: breadcrumbs });
+    const re = classifyContentType({ keyword: '', categories: breadcrumbs, scope: settings.contentScope || 'strict' });
     const alreadyExcluded = parent.metrics.contentType === 'high-content-excluded';
     if (!alreadyExcluded && re.contentType === 'high-content-excluded') {
       parent.metrics.contentType = 'high-content-excluded';
@@ -706,6 +708,7 @@ async function handleExpandSeed(seed, marketCode) {
   const seedProxy = computeDemandProxyScore({ amazon: corpus.amazon, google: corpus.google });
 
   const allowFiction = settings.allowNicheFiction !== false;
+  const scope = settings.contentScope || 'strict';
 
   let suggestions;
   if (apiKey) {
@@ -714,14 +717,16 @@ async function handleExpandSeed(seed, marketCode) {
       seed,
       market,
       count: 12,
-      allowFiction
+      allowFiction,
+      scope
     });
   } else {
     suggestions = await localExpandSuggestions({
       amazonWords: corpus.amazon.map((e) => e.term),
       googleWords: corpus.google.map((e) => e.term),
       seed,
-      allowFiction
+      allowFiction,
+      scope
     });
   }
 
@@ -737,7 +742,7 @@ async function handleExpandSeed(seed, marketCode) {
   // corpus-verified, so they only lose the hard-excluded class.
   const isExistingTitle = (s) => s && s.isExistingTitle === true;
   const classifyDrop = (kw, { dropUnknown }) => {
-    const ct = classifyContentType({ keyword: kw, allowFiction });
+    const ct = classifyContentType({ keyword: kw, allowFiction, scope });
     if (ct.contentType === 'high-content-excluded' || ct.requiresExpertise) return true;
     if (dropUnknown && ct.contentType === 'unknown') return true;
     return false;
@@ -805,7 +810,7 @@ async function handleExpandSeed(seed, marketCode) {
       probed
     };
     const scored = scoreKeyword(keyword, { demandProxyScore, sampleSize: 0 }, { longTail: true, thresholds });
-    const ct = classifyContentType({ keyword, allowFiction });
+    const ct = classifyContentType({ keyword, allowFiction, scope });
     records.push({
       keyword,
       market: market.code,
@@ -835,7 +840,7 @@ async function handleExpandSeed(seed, marketCode) {
       confidence: scored.confidence,
       estimatedMonthlySales: null,
       verdict: scored.verdict,
-      qualifies: computeSuggestionQualifies(scored, thresholds, keyword, allowFiction)
+      qualifies: computeSuggestionQualifies(scored, thresholds, keyword, allowFiction, scope)
     });
   }
 
@@ -865,8 +870,8 @@ async function handleExpandSeed(seed, marketCode) {
   };
 }
 
-function computeSuggestionQualifies(scored, thresholds, keyword, allowFiction = true) {
-  const ct = classifyContentType({ keyword: keyword || '', allowFiction });
+function computeSuggestionQualifies(scored, thresholds, keyword, allowFiction = true, scope = 'strict') {
+  const ct = classifyContentType({ keyword: keyword || '', allowFiction, scope });
   const excluded =
     ct.contentType === 'high-content-excluded' || ct.requiresExpertise;
   return {
@@ -949,11 +954,14 @@ async function expandFromSuggestions(marketCode) {
     }, {})
   );
 
-  const records = unique.map((s) => {
-    const scored = scoreKeyword(s.keyword, {}, { longTail: true, thresholds });
-    const allowFiction = settings.allowNicheFiction !== false;
-    const ct = classifyContentType({ keyword: s.keyword, allowFiction });
-    return {
+  const records = unique
+    .map((s) => {
+      const scored = scoreKeyword(s.keyword, {}, { longTail: true, thresholds });
+      const allowFiction = settings.allowNicheFiction !== false;
+      const scope = settings.contentScope || 'strict';
+      const ct = classifyContentType({ keyword: s.keyword, allowFiction, scope });
+      if (ct.contentType === 'high-content-excluded' || (scope === 'strict' && ct.contentType === 'unknown')) return null;
+      return {
       keyword: s.keyword,
       market: market.code,
       source: s.source || 'unknown',
@@ -976,9 +984,10 @@ async function expandFromSuggestions(marketCode) {
       confidence: scored.confidence,
       estimatedMonthlySales: null,
       verdict: scored.verdict,
-      qualifies: computeSuggestionQualifies(scored, thresholds, s.keyword, settings.allowNicheFiction !== false)
-    };
-  });
+      qualifies: computeSuggestionQualifies(scored, thresholds, s.keyword, settings.allowNicheFiction !== false, settings.contentScope || 'strict')
+      };
+    })
+    .filter(Boolean);
 
   if (records.length) await putKeywords(records);
   enqueueScraping(records.map((r) => r.keyword), market.code);
@@ -1171,20 +1180,23 @@ async function runDiscovery({
   }
   const mergedProxy = computeDemandProxyScore({ amazon: corpus.amazon, google: corpus.google });
 
-  // Phase 1.5: drop keywords an indie can't publish (novels, clinical/expert
-  // non-fiction) before they reach the batch scraper.
-  const freshWithCt = fresh.map((k) => ({ ...k, ct: classifyContentType({ keyword: k.keyword }) }));
+  // Phase 1.5 / v0.6: drop keywords an indie can't publish before they reach
+  // the batch scraper. In strict scope ONLY blank-interior families qualify.
+  const scope = settings.contentScope || 'strict';
+  const freshWithCt = fresh.map((k) => ({ ...k, ct: classifyContentType({ keyword: k.keyword, scope }) }));
   const publishable =
     thresholds.contentTypeEnabled === false
       ? freshWithCt
-      : freshWithCt.filter((k) => k.ct.contentType !== 'high-content-excluded' && !k.ct.requiresExpertise);
+      : scope === 'strict'
+        ? freshWithCt.filter((k) => k.ct.contentType === 'low-content')
+        : freshWithCt.filter((k) => k.ct.contentType !== 'high-content-excluded' && !k.ct.requiresExpertise);
   const skipped = freshWithCt.length - publishable.length;
   if (skipped > 0) {
-    broadcastPipeline('discovery', `Discovery skipped ${skipped} high-content term(s) (novels / expert non-fiction).`);
+    broadcastPipeline('discovery', `Discovery skipped ${skipped} term(s) outside the ${scope} content scope (non-low-content / expert non-fiction).`);
   }
 
   if (!publishable.length) {
-    broadcastPipeline('discovery', 'Discovery found only high-content terms — nothing publishable to queue.');
+    broadcastPipeline('discovery', 'Discovery found nothing inside the current content scope — nothing publishable to queue.');
     return { count: 0, discovered: [], consumed: discoveryState.found.length, skipped };
   }
 
@@ -1220,7 +1232,7 @@ async function runDiscovery({
       confidence: scored.confidence,
       estimatedMonthlySales: null,
       verdict: scored.verdict,
-      qualifies: computeSuggestionQualifies(scored, thresholds, k.keyword)
+      qualifies: computeSuggestionQualifies(scored, thresholds, k.keyword, settings.allowNicheFiction !== false, scope)
     };
   });
 

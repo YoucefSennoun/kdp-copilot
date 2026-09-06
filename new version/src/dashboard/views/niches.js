@@ -1,6 +1,7 @@
 import { send, fmt, escapeHtml } from '../helpers.js';
 import { settings } from '../app.js';
 import { openDetailDrawer } from './detail.js';
+import { classifyContentType, isLowContentNiche } from '../../lib/content-type.js';
 
 const $ = (id) => document.getElementById(id);
 let allKeywords = [];
@@ -12,7 +13,8 @@ export async function onShow() {
     bsrThreshold: s.bsrThreshold ?? 200,
     listingsThreshold: s.listingsThreshold ?? 1000,
     volumeThreshold: s.volumeThreshold ?? 50,
-    contentTypeEnabled: s.contentTypeEnabled !== false
+    contentTypeEnabled: s.contentTypeEnabled !== false,
+    contentScope: s.contentScope || 'strict'
   };
   $('niche-bsr-cap').textContent = thresholds.bsrThreshold;
   $('niche-listings-cap').textContent = thresholds.listingsThreshold;
@@ -27,7 +29,15 @@ async function refresh() {
 
 function qualifiesAgainst(record) {
   const m = record.metrics || {};
-  const excluded = m.contentType === 'high-content-excluded' || m.requiresExpertise === true;
+  // v0.6: re-check the record under the CURRENT content scope so legacy rows
+  // saved as 'guide'/'fiction'/'unknown' from earlier versions can't slip
+  // past the gate. In strict scope only blank-interior families qualify.
+  let storedOk =
+    m.contentType !== 'high-content-excluded' && m.requiresExpertise !== true;
+  if (thresholds.contentTypeEnabled && thresholds.contentScope === 'strict' && storedOk) {
+    storedOk = isLowContentNiche(classifyContentType({ keyword: record.keyword || '', scope: 'strict' }));
+  }
+  const excluded = thresholds.contentTypeEnabled ? !storedOk : false;
   return {
     bsr:
       m.bestSubcategoryBsr != null &&
@@ -64,7 +74,7 @@ function renderNicheTable() {
         (b.record.metrics.bestSubcategoryBsr ?? Infinity)
     );
 
-  $('niche-status').textContent = `${scored.length} of ${candidates.length} BSR-enriched keywords qualify (${thresholds.bsrThreshold}/${thresholds.listingsThreshold}/${thresholds.volumeThreshold}${thresholds.contentTypeEnabled ? ' + publishable' : ''}).`;
+  $('niche-status').textContent = `${scored.length} of ${candidates.length} BSR-enriched keywords qualify (${thresholds.bsrThreshold}/${thresholds.listingsThreshold}/${thresholds.volumeThreshold}${thresholds.contentTypeEnabled ? (thresholds.contentScope === 'strict' ? ' + low-content-only' : ' + publishable') : ''}).`;
 
   const body = $('niches-body');
   if (!scored.length) {

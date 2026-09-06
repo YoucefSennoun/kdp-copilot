@@ -112,20 +112,45 @@ async function callGemini({ apiKey, model = DEFAULT_MODEL, systemInstruction, pr
 // 1. Niche expansion: seed -> adjacent low-competition book concepts
 // ---------------------------------------------------------------------------
 
-function buildExpansionPrompt(seed, market, count) {
+function buildExpansionPrompt(seed, market, count, scope = 'strict') {
+  const strictRules = scope === 'strict'
+    ? [
+        `SCOPE: STRICT LOW-CONTENT ONLY (Amazon's official "generally low-content" definition).`,
+        `You must ONLY propose BLANK-INTERIOR book families:`,
+        `- notebooks (dot grid, composition, lined)`,
+        `- planners (weekly, monthly, meal, budget, class/trip/planner)`,
+        `- diaries and journals (plain, gratitude, manifestation, prompt journals)`,
+        `- log / tracking books (habit, workout, food, reading, sleep, symptom, activity logs; thankfulness trackers)`,
+        `- coupon books`,
+        `- score card templates (sports scorecards, score sheets, game tracking)`,
+        `- crafting templates (scrapbook paper, ephemera, card-making, stencils)`,
+        `- blank sheet music / manuscript / staff paper`,
+        `- personalized/name-variant blank books (e.g. "for a girl named…")`,
+        `Forbidden in this scope (they are NOT "generally low-content" per Amazon): novels, fiction, non-fiction prose,`,
+        `coloring books, puzzle/activity books, workbooks, photography books, printed sheet music, manuals, textbooks, children's story books.`,
+        `If a niche is not one of the allowed blank-interior families, do NOT propose it at all.`,
+      ]
+    : [
+        `SCOPE: STANDARD KDP-FRIENDLY (low-content + production-ready content).`,
+        `ONLY propose niches whose physical book an indie can create without specialist credentials:`,
+        `- low-content: journals, diaries, planners, notebooks, logbooks, trackers, calendars, gratitude/prompt books, guest books, coupon books, score cards, crafting templates, blank sheet music`,
+        `- medium-content: coloring books, activity books, puzzle books (crosswords, word search, sudoku, mazes), workbooks, practice/handwriting books, flash cards`,
+        `- personalized/name-variant books (e.g. "for a girl named…")`,
+        `- researched-and-compiled guides: checklists, templates, curated how-to compilations, recipe collections, beginner guides a layperson can compile`,
+        `- NARROW FICTION niches (optional): only when the niche names a specific sub-genre AND a concrete audience/setting (e.g. "cozy mysteries for seniors", "chapter books for girls 6-8"). Generic "novels", "romance", "fiction" broad terms are NEVER acceptable.`,
+      ];
   return [
     `Act as a senior Amazon KDP (Kindle Direct Publishing) niche research strategist.`,
     `Given the seed niche "${seed}" for the ${market.label} Amazon marketplace,`,
     `propose ${count} ADJACENT, low-to-mid competition book niches an independent publisher can ACTUALLY produce.`,
-    `ONLY propose niches whose physical book an indie can create without specialist credentials or years of writing:`,
-    `- low-content: journals, diaries, planners, notebooks, logbooks, trackers, calendars, gratitude/prompt books, guest books`,
-    `- medium-content: coloring books, activity books, puzzle books (crosswords, word search, sudoku, mazes), workbooks, practice/handwriting books, flash cards`,
-    `- personalized/name-variant books (e.g. "for a girl named…")`,
-    `- researched-and-compiled guides: checklists, templates, curated how-to compilations, recipe collections, beginner guides a layperson can compile`,
-    `- NARROW FICTION niches (optional): only when the niche names a specific sub-genre AND a concrete audience/setting (e.g. "cozy mysteries for seniors", "chapter books for girls 6-8", "sci-fi romance for adults"). Generic "novels", "romance", "fiction" broad terms are NEVER acceptable.`,
+    ...strictRules,
     `NEVER propose memoirs, biographies, essays, short-story anthologies, poetry, or expertise-required textbooks/clinical/scientific/legal/academic works.`,
-    `Never propose books whose subject is BECOMING a writer or self-publishing (e.g. "how to write a book", "book marketing for authors") -- those sell to authors, not to niche buyers. A planner/journal/workbook FOR that audience is fine ("novel writing planner").`,
-    `A health-adjacent niche is allowed ONLY in its compiled/lay form (e.g. "diabetes-friendly recipes", "first-trimester guide") -- never clinical reference material.`,
+    scope !== 'strict'
+      ? `Never propose books whose subject is BECOMING a writer or self-publishing (e.g. "how to write a book", "book marketing for authors") -- those sell to authors, not to niche buyers. A planner/journal/workbook FOR that audience is fine ("novel writing planner").`
+      : `Never propose books whose subject is BECOMING a writer or self-publishing -- they are non-fiction prose, outside this scope.`,
+    scope !== 'strict'
+      ? `A health-adjacent niche is allowed ONLY in its compiled/lay form (e.g. "diabetes-friendly recipes", "first-trimester guide") -- never clinical reference material.`
+      : `A health-adjacent niche is allowed ONLY as a blank log/journal/planner (e.g. "diabetes logbook", "meal planner") -- never clinical reference or prose.`,
     `Prefer long-tail keywords with real buyer intent over broad head terms.`,
     ``,
     `CRITICAL RULE -- never suggest an existing book. If a keyword is the exact or near-exact title of a real, previously published, identifiable book you recognize, set "isExistingTitle": true. Existing titles are useless niches. Examples of EXISTING BOOKS you must NOT propose:`,
@@ -146,7 +171,7 @@ function buildExpansionPrompt(seed, market, count) {
           why: 'one sentence on why this niche is winnable',
           titleIdea: 'a marketable book title that hits this keyword',
           demandSignal: 'low | medium | high',
-          contentType: 'low-content | medium-content | personalized | guide | fiction-niche',
+          contentType: scope === 'strict' ? 'low-content' : 'low-content | medium-content | personalized | guide | fiction-niche',
           isExistingTitle: false
         }
       ]
@@ -155,13 +180,13 @@ function buildExpansionPrompt(seed, market, count) {
   ].join('\n');
 }
 
-export async function expandNicheSeeds({ apiKey, seed, market, count = 10, allowFiction = true }) {
-  const prompt = buildExpansionPrompt(seed, market, count);
+export async function expandNicheSeeds({ apiKey, seed, market, count = 10, allowFiction = true, scope = 'strict' }) {
+  const prompt = buildExpansionPrompt(seed, market, count, scope);
   const data = await callGemini({ apiKey, prompt });
   const niches = Array.isArray(data) ? data : data?.niches;
   if (!Array.isArray(niches)) throw new Error('Model response missing "niches" array.');
   return niches
-    .filter((s) => isSuggestibleSuggestion(s, { allowFiction }))
+    .filter((s) => isSuggestibleSuggestion(s, { allowFiction, scope }))
     .slice(0, count);
 }
 
@@ -171,12 +196,12 @@ export async function expandNicheSeeds({ apiKey, seed, market, count = 10, allow
  * suggestions that trip the high-content classifier, and phrasing tells that
  * indicate a real book ("by <Author>", "bestseller", "classic").
  */
-export function isSuggestibleSuggestion(s = {}, { allowFiction = true } = {}) {
+export function isSuggestibleSuggestion(s = {}, { allowFiction = true, scope = 'strict' } = {}) {
   if (s.isExistingTitle === true) return false;
 
   const keyword = String(s.keyword || '').trim();
   const titleIdea = String(s.titleIdea || '').trim();
-  const ct = classifyContentType({ keyword: `${keyword} ${titleIdea}`.trim(), allowFiction });
+  const ct = classifyContentType({ keyword: `${keyword} ${titleIdea}`.trim(), allowFiction, scope });
   if (ct.contentType === 'high-content-excluded') return false;
 
   const why = String(s.why || '');
@@ -432,7 +457,7 @@ function matchesSeed(seed, word) {
  * Expand beyond a seed using real Amazon + Google autocomplete data.
  * Builds an "alphabet soup" style set of adjacent commercial search terms.
  */
-export async function localExpandSuggestions({ amazonWords, googleWords, seed, allowFiction = true }) {
+export async function localExpandSuggestions({ amazonWords, googleWords, seed, allowFiction = true, scope = 'strict' }) {
   const seen = new Set();
   const out = [];
 
@@ -442,7 +467,7 @@ export async function localExpandSuggestions({ amazonWords, googleWords, seed, a
     if (clean === (seed || '').trim().toLowerCase()) return;
     if (matchesSeed(seed, clean)) {
       seen.add(clean);
-      out.push({ keyword: clean, source, score: computeSuggestionRelevance(clean, seed, allowFiction) });
+      out.push({ keyword: clean, source, score: computeSuggestionRelevance(clean, seed, allowFiction, scope) });
     }
   };
 
@@ -459,7 +484,7 @@ export async function localExpandSuggestions({ amazonWords, googleWords, seed, a
  * long-tail length, and commercial-intent markers. Used to rank suggestions
  * AND to persist a per-keyword "interest proxy" weight (Phase 3).
  */
-export function computeSuggestionRelevance(word, seed, allowFiction = true) {
+export function computeSuggestionRelevance(word, seed, allowFiction = true, scope = 'strict') {
   const seedParts = (seed || '').toLowerCase().trim().split(/\s+/).filter(Boolean);
   const wParts = word.split(/\s+/);
   const shared = wParts.filter((p) => seedParts.includes(p)).length;
@@ -470,11 +495,12 @@ export function computeSuggestionRelevance(word, seed, allowFiction = true) {
   if (wParts.length > 7) score -= 0.2;
   if (/free|pdf|download|printable/i.test(word)) score -= 0.15; // low-commercial intent books
 
-  // Phase 1.5: deprioritize high-content suggestions (novels, clinical texts,
-  // academic works) an indie cannot produce; slightly reward the ones we can.
-  // Narrow-fiction niches count as publishable when allowed.
-  const ct = classifyContentType({ keyword: word, allowFiction });
+  // Phase 1.5: deprioritize high-content suggestions an indie cannot produce.
+  // In strict scope only blank-interior families survive, so give the
+  // confirmed low-content families the bonus and push everything else down.
+  const ct = classifyContentType({ keyword: word, allowFiction, scope });
   if (ct.contentType === 'high-content-excluded') score -= 0.35;
+  else if (scope === 'strict' && ct.contentType === 'low-content') score += 0.15;
   else if (ct.contentType !== 'unknown') score += 0.05;
 
   // Revision 2: explicit tells the classifier's phrase list can miss when the

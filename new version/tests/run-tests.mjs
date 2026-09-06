@@ -18,7 +18,7 @@ import {
   computeDemandProxyScore,
   deriveSuggestionProxy
 } from '../src/lib/proxy.js';
-import { classifyContentType } from '../src/lib/content-type.js';
+import { classifyContentType, isLowContentNiche } from '../src/lib/content-type.js';
 import { isSuggestibleSuggestion } from '../src/background/ai.js';
 
 let passed = 0;
@@ -328,12 +328,18 @@ console.log('\n[9] Revision 2: existing-book titles + isSuggestibleSuggestion ga
     assert(ct.contentType === 'unknown', `"${kw}" classifies unknown (Fix A drop trigger)`);
   }
 
-  assert(isSuggestibleSuggestion({ keyword: 'the intelligent investor', isExistingTitle: true }) === false, 'model-self-flagged existing title rejected');
-  assert(isSuggestibleSuggestion({ keyword: 'sudoku for adults', why: 'bestseller in its node' }) === false, '"bestseller" tell rejected');
-  assert(isSuggestibleSuggestion({ keyword: 'kids activity book', why: 'a low competition classic pick' }) === false, '"classic" tell rejected');
-  assert(isSuggestibleSuggestion({ keyword: 'kids activity book', category: 'guide by mary smith on basics' }) === false, '"by <Author>" tell rejected');
-  assert(isSuggestibleSuggestion({ keyword: 'clinical handbook of diabetes' }) === false, 'hard-excluded engine suggestion rejected');
-  assert(isSuggestibleSuggestion({ keyword: 'vegan beginner cookbook', titleIdea: 'The Everyday Vegan Cookbook', why: 'recipe compilation for beginners' }) === true, 'clean guide suggestion passes');
+assert(isSuggestibleSuggestion({ keyword: 'the intelligent investor', isExistingTitle: true }, { scope: 'standard' }) === false, 'model-self-flagged existing title rejected');
+  assert(isSuggestibleSuggestion({ keyword: 'sudoku for adults', why: 'bestseller in its node' }, { scope: 'standard' }) === false, '"bestseller" tell rejected');
+  assert(isSuggestibleSuggestion({ keyword: 'kids activity book', why: 'a low competition classic pick' }, { scope: 'standard' }) === false, '"classic" tell rejected');
+  assert(isSuggestibleSuggestion({ keyword: 'kids activity book', category: 'guide by mary smith on basics' }, { scope: 'standard' }) === false, '"by <Author>" tell rejected');
+  assert(isSuggestibleSuggestion({ keyword: 'clinical handbook of diabetes' }, { scope: 'standard' }) === false, 'hard-excluded engine suggestion rejected');
+  assert(isSuggestibleSuggestion({ keyword: 'vegan beginner cookbook', titleIdea: 'The Everyday Vegan Cookbook', why: 'recipe compilation for beginners' }, { scope: 'standard' }) === true, 'clean guide suggestion passes');
+
+  // Default scope is now strict: only blank-interior families survive.
+  assert(isSuggestibleSuggestion({ keyword: 'wellness journal for women' }) === true, 'strict scope keeps a journal niche');
+  assert(isSuggestibleSuggestion({ keyword: 'cozy mysteries for seniors' }) === false, 'strict scope drops a fiction niche');
+  assert(isSuggestibleSuggestion({ keyword: 'coloring book for adults animals' }) === false, 'strict scope drops coloring books (not "generally low-content")');
+  assert(isSuggestibleSuggestion({ keyword: 'beginners guide to gardening' }) === false, 'strict scope drops guides');
 }
 
 console.log('\n[10] leader-dominance fingerprint (single-work-driven terms)');
@@ -393,6 +399,57 @@ console.log('\n[11] v0.5: narrow-fiction carve-out + writer-craft denial');
 
   const unk = classifyContentType({ keyword: 'space opera romance for adults' });
   assert(unk.contentType === 'fiction', 'subgenre + audience fiction → fiction-niche');
+}
+
+console.log('\n[12] v0.6 strict scope: Amazon "generally low-content" list only');
+{
+  const j = classifyContentType({ keyword: 'wellness journal for women', scope: 'strict' });
+  assert(isLowContentNiche(j) && j.contentTypeLabel === 'Journal', 'journal → strict low-content');
+
+  const planner = classifyContentType({ keyword: 'academic planner', scope: 'strict' });
+  assert(isLowContentNiche(planner), 'planner → strict low-content');
+
+  const notebook = classifyContentType({ keyword: 'dot grid notebook for work', scope: 'strict' });
+  assert(isLowContentNiche(notebook), 'notebook → strict low-content');
+
+  const logbook = classifyContentType({ keyword: 'habit tracker logbook', scope: 'strict' });
+  assert(isLowContentNiche(logbook), 'log/tracking book → strict low-content');
+
+  const prompt = classifyContentType({ keyword: 'gratitude prompt journal', scope: 'strict' });
+  assert(isLowContentNiche(prompt), 'prompt journal → strict low-content');
+
+  const coupon = classifyContentType({ keyword: 'coupon book organizer', scope: 'strict' });
+  assert(isLowContentNiche(coupon), 'coupon book → strict low-content');
+
+  const score = classifyContentType({ keyword: 'baseball score card template', scope: 'strict' });
+  assert(isLowContentNiche(score), 'score card template → strict low-content');
+
+  const craft = classifyContentType({ keyword: 'scrapbook paper ephemera templates', scope: 'strict' });
+  assert(isLowContentNiche(craft), 'crafting templates → strict low-content');
+
+  const sheet = classifyContentType({ keyword: 'blank sheet music paper', scope: 'strict' });
+  assert(isLowContentNiche(sheet), 'blank sheet music → strict low-content');
+
+  const pers = classifyContentType({ keyword: 'personalized name book for girls', scope: 'strict' });
+  assert(isLowContentNiche(pers), 'personalized blank book → strict low-content');
+
+  // Amazon's own list puts these in "Not Generally Low-Content".
+  for (const [kw, label] of [
+    ['coloring book for adults animals', 'coloring books'],
+    ['sudoku puzzle book for adults', 'puzzle books'],
+    ['handwriting workbook for kids', 'workbooks'],
+    ['camera manual', 'manuals'],
+    ['beginners guide to gardening', 'guides'],
+    ['cozy mysteries for seniors', 'novels/fiction'],
+    ['how to write a book', 'writer-craft books'],
+    ['air fryer cookbook', 'cookbooks']
+  ]) {
+    const ct = classifyContentType({ keyword: kw, scope: 'strict' });
+    assert(!isLowContentNiche(ct) && ct.contentType === 'high-content-excluded', `${label} → NOT low-content (strict)`);
+  }
+
+  const standardColoring = classifyContentType({ keyword: 'coloring book for adults animals', scope: 'standard' });
+  assert(standardColoring.contentType === 'medium-content', 'standard scope still allows coloring books');
 }
 
 console.log(`\n${passed} passed, ${failed} failed`);
