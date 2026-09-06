@@ -11,13 +11,15 @@ import {
   applyBsrSamples,
   scoreKeyword,
   computeCompetition,
-  computeBsrStats
+  computeBsrStats,
+  computeListingsStats
 } from '../src/lib/scoring.js';
 import {
   computeDemandProxyScore,
   deriveSuggestionProxy
 } from '../src/lib/proxy.js';
 import { classifyContentType } from '../src/lib/content-type.js';
+import { isSuggestibleSuggestion } from '../src/background/ai.js';
 
 let passed = 0;
 let failed = 0;
@@ -202,7 +204,7 @@ console.log('\n[6] deriveSuggestionProxy determinism + position weighting');
   };
   const top = deriveSuggestionProxy('kids activity book', posCorpus, 60);
   const absent = deriveSuggestionProxy('somewhere far', posCorpus, 60);
-  assert(top > absent, 'appearing in soup at position 1 outranks an absent term (same seed depth)');
+  assert(top != null && absent === null, 'term in soup yields a proxy; full-miss term returns null ("not yet measured")');
 
   const deeperSeed = deriveSuggestionProxy('kids activity book', posCorpus, 95);
   const shallowerSeed = deriveSuggestionProxy('kids activity book', posCorpus, 20);
@@ -314,6 +316,50 @@ console.log('\n[8] KDP-publishable content gate in computeQualifies');
     t
   );
   assert(legacy.contentType === true && legacy.all === true, 'records without classification still pass (backwards compat)');
+}
+
+console.log('\n[9] Revision 2: existing-book titles + isSuggestibleSuggestion gate');
+{
+  // The named failing titles carry no low-content markers, so the classifier
+  // says "unknown" — exactly the state Fix A drops from the AI path (unknown
+  // is NOT cleared when the model generated the suggestion).
+  for (const kw of ['the intelligent investor', 'antifragile', 'principles: life and work', 'the runaway bunny']) {
+    const ct = classifyContentType({ keyword: kw });
+    assert(ct.contentType === 'unknown', `"${kw}" classifies unknown (Fix A drop trigger)`);
+  }
+
+  assert(isSuggestibleSuggestion({ keyword: 'the intelligent investor', isExistingTitle: true }) === false, 'model-self-flagged existing title rejected');
+  assert(isSuggestibleSuggestion({ keyword: 'sudoku for adults', why: 'bestseller in its node' }) === false, '"bestseller" tell rejected');
+  assert(isSuggestibleSuggestion({ keyword: 'kids activity book', why: 'a low competition classic pick' }) === false, '"classic" tell rejected');
+  assert(isSuggestibleSuggestion({ keyword: 'kids activity book', category: 'guide by mary smith on basics' }) === false, '"by <Author>" tell rejected');
+  assert(isSuggestibleSuggestion({ keyword: 'clinical handbook of diabetes' }) === false, 'hard-excluded engine suggestion rejected');
+  assert(isSuggestibleSuggestion({ keyword: 'vegan beginner cookbook', titleIdea: 'The Everyday Vegan Cookbook', why: 'recipe compilation for beginners' }) === true, 'clean guide suggestion passes');
+}
+
+console.log('\n[10] leader-dominance fingerprint (single-work-driven terms)');
+{
+  const single = computeListingsStats(
+    [1, 2, 3, 4, 5].map((n) => ({ title: `The One Big Book${n}`, reviewCount: n === 1 ? 500 : 10, avgRating: 4.5, price: 12 }))
+  );
+  assert(single.leaderDominanceRatio > 0.9, `top title dominates review share (${single.leaderDominanceRatio.toFixed(2)})`);
+
+  const broad = computeListingsStats(
+    [1, 2, 3, 4, 5].map((n) => ({ title: `Guide Volume ${n}`, reviewCount: 90 + n * 5, avgRating: 4.5, price: 12 }))
+  );
+  assert(broad.leaderDominanceRatio < 0.4, `review share spread across several titles (${broad.leaderDominanceRatio.toFixed(2)})`);
+
+  const t = { bsrThreshold: 200, listingsThreshold: 1000, volumeThreshold: 50 };
+  const dominated = computeQualifies(
+    { bestSubcategoryBsr: 120, totalResultsCount: 700, demandProxyScore: 60, contentType: 'guide', leaderDominanceRatio: 0.93, totalReviews: 540, sampleSize: 5 },
+    t
+  );
+  assert(dominated.contentType === false && dominated.all === false, 'single title owns >60% of reviews → fails content gate');
+
+  const healthy = computeQualifies(
+    { bestSubcategoryBsr: 120, totalResultsCount: 700, demandProxyScore: 60, contentType: 'guide', leaderDominanceRatio: 0.3, totalReviews: 540, sampleSize: 5 },
+    t
+  );
+  assert(healthy.contentType === true && healthy.all === true, 'spread review share → still qualifies');
 }
 
 console.log(`\n${passed} passed, ${failed} failed`);

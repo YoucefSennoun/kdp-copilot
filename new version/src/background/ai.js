@@ -125,6 +125,15 @@ function buildExpansionPrompt(seed, market, count) {
     `NEVER propose fiction, novels, short stories, memoirs, biographies, poetry, essays, or expertise-required textbooks/clinical/scientific/legal/academic works.`,
     `A health-adjacent niche is allowed ONLY in its compiled/lay form (e.g. "diabetes-friendly recipes", "first-trimester guide") -- never clinical reference material.`,
     `Prefer long-tail keywords with real buyer intent over broad head terms.`,
+    ``,
+    `CRITICAL RULE -- never suggest an existing book. If a keyword is the exact or near-exact title of a real, previously published, identifiable book you recognize, set "isExistingTitle": true. Existing titles are useless niches. Examples of EXISTING BOOKS you must NOT propose:`,
+    `- "The Intelligent Investor" (Benjamin Graham finance classic)`,
+    `- "Antifragile" (Nassim Taleb essay)`,
+    `- "Principles: Life and Work" (Ray Dalio)`,
+    `- "The Runaway Bunny" (children's picture book)`,
+    `- "How Countries Go Broke" (published finance title)`,
+    `If you recognize a keyword as a published book title, refuse it with "isExistingTitle": true rather than inventing a claim about it.`,
+    ``,
     `Return JSON exactly in this shape:`,
     JSON.stringify({
       niches: [
@@ -135,7 +144,8 @@ function buildExpansionPrompt(seed, market, count) {
           why: 'one sentence on why this niche is winnable',
           titleIdea: 'a marketable book title that hits this keyword',
           demandSignal: 'low | medium | high',
-          contentType: 'low-content | medium-content | personalized | guide'
+          contentType: 'low-content | medium-content | personalized | guide',
+          isExistingTitle: false
         }
       ]
     }),
@@ -148,7 +158,32 @@ export async function expandNicheSeeds({ apiKey, seed, market, count = 10 }) {
   const data = await callGemini({ apiKey, prompt });
   const niches = Array.isArray(data) ? data : data?.niches;
   if (!Array.isArray(niches)) throw new Error('Model response missing "niches" array.');
-  return niches.slice(0, count);
+  return niches
+    .filter(isSuggestibleSuggestion)
+    .slice(0, count);
+}
+
+/**
+ * Synchronous gate right after generation (Revision 2, Gap F / Bug 1).
+ * Rejects suggestions the model itself flagged as existing titles, engine
+ * suggestions that trip the high-content classifier, and phrasing tells that
+ * indicate a real book ("by <Author>", "bestseller", "classic").
+ */
+export function isSuggestibleSuggestion(s = {}) {
+  if (s.isExistingTitle === true) return false;
+
+  const keyword = String(s.keyword || '').trim();
+  const titleIdea = String(s.titleIdea || '').trim();
+  const ct = classifyContentType({ keyword: `${keyword} ${titleIdea}`.trim() });
+  if (ct.contentType === 'high-content-excluded') return false;
+
+  const why = String(s.why || '');
+  const category = String(s.category || '');
+  const tells = ` ${why} ${category}`.toLowerCase();
+  if (/by [a-z]+ [a-z]+/.test(tells)) return false;            // "by Warren Buffett"
+  if (/\bbestseller\b/.test(tells)) return false;
+  if (/\bclassic\b/.test(tells)) return false;
+  return true;
 }
 
 // ---------------------------------------------------------------------------
@@ -438,6 +473,12 @@ export function computeSuggestionRelevance(word, seed) {
   const ct = classifyContentType({ keyword: word });
   if (ct.contentType === 'high-content-excluded') score -= 0.35;
   else if (ct.contentType !== 'unknown') score += 0.05;
+
+  // Revision 2: explicit tells the classifier's phrase list can miss when the
+  // token is glued to punctuation/case the signals don't cover.
+  if (/\b(novel|novels|fiction|memoir|memoirs|biography|biographies|poetry|essays)\b/i.test(word)) score -= 0.1;
+  if (/\b(clinical|diagnos|patholog|textbook|dissertation|thesis)\w*/i.test(word)) score -= 0.1;
+  if (/\b(m\.?d\.?|ph\.?d\.?|esq\.?|m d|ph d)\b/i.test(word)) score -= 0.1;
 
   if (/book|cookbook|guide|workbook|journal|planner|for\s+\w+/i.test(word)) score += 0.1;
   return Math.max(0.1, Math.min(1.2, score));

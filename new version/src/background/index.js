@@ -725,18 +725,84 @@ async function handleExpandSeed(seed, marketCode) {
     throw new Error('No suggestions could be generated. Add a Gemini API key or retry with a clearer seed.');
   }
 
-  const records = suggestions.map((s, i) => {
-    const keyword = (s.keyword || s).trim();
-    const demandProxyScore = deriveSuggestionProxy(keyword, corpus, seedProxy.score);
+  // Fix A (Revision 2): the content-type verdict was computed but never acted
+  // on. For AI output -- where the model makes things up -- an 'unknown'
+  // verdict is NOT cleared: it usually means an existing-book title (e.g.
+  // "the intelligent investor") with no low-content markers, and there is no
+  // other pre-scrape signal to rescue it. Local autocomplete suggestions are
+  // corpus-verified, so they only lose the hard-excluded class.
+  const isExistingTitle = (s) => s && s.isExistingTitle === true;
+  const classifyDrop = (kw, { dropUnknown }) => {
+    const ct = classifyContentType({ keyword: kw });
+    if (ct.contentType === 'high-content-excluded' || ct.requiresExpertise) return true;
+    if (dropUnknown && ct.contentType === 'unknown') return true;
+    return false;
+  };
+
+  let skippedCt = 0;
+  const candidates = suggestions.filter((s) => {
+    const keyword = String((s.keyword || s) || '').trim();
+    if (isExistingTitle(s) || !keyword) {
+      skippedCt++;
+      return false;
+    }
+    if (classifyDrop(keyword, { dropUnknown: !!apiKey })) {
+      skippedCt++;
+      return false;
+    }
+    return true;
+  });
+
+  if (!candidates.length) {
+    throw new Error('All suggestions were high-content, existing-book titles, or empty. Try a different seed.');
+  }
+
+  // Revision 2 (Bug 2): when a suggestion misses the shared alphabet-soup
+  // corpus, `deriveSuggestionProxy` now returns null instead of a seed-wide
+  // constant that made every unrelated title share an identical score tuple.
+  // Probe the term once directly per-suggestion; if that also fails, the
+  // proxy stays honestly null ("not yet measured") and demand falls to its
+  // data-blind baseline.
+  async function probeSuggestionProxy(keyword, marketCode, settings) {
+    const amazon = [];
+    const google = [];
+    if (settings.autocompleteEnabled !== false) {
+      try {
+        (await amazonAutocomplete(keyword, marketCode)).forEach((w, i) => amazon.push({ term: w, position: i + 1 }));
+      } catch {
+        // probe failures are expected under rate limiting
+      }
+    }
+    if (settings.googleSuggestEnabled !== false) {
+      try {
+        (await googleSuggest(keyword, marketCode)).forEach((w, i) => google.push({ term: w, position: i + 1 }));
+      } catch {
+        // ignore
+      }
+    }
+    if (!amazon.length && !google.length) return null;
+    return computeDemandProxyScore({ amazon, google }).score;
+  }
+
+  const records = [];
+  for (const s of candidates) {
+    const keyword = String(s.keyword || s || '').trim();
+    let demandProxyScore = deriveSuggestionProxy(keyword, corpus, seedProxy.score);
+    let probed = false;
+    if (demandProxyScore == null) {
+      demandProxyScore = await probeSuggestionProxy(keyword, market.code, settings);
+      probed = true;
+    }
     const proxyBreakdown = {
       seedProxyScore: seedProxy.score,
       corpusAmazon: corpus.amazon.length,
       corpusGoogle: corpus.google.length,
-      crossMatches: seedProxy.breakdown ? seedProxy.breakdown.crossMatches : 0
+      crossMatches: seedProxy.breakdown ? seedProxy.breakdown.crossMatches : 0,
+      probed
     };
-    const scored = scoreKeyword(keyword, { demandProxyScore }, { longTail: true, thresholds });
+    const scored = scoreKeyword(keyword, { demandProxyScore, sampleSize: 0 }, { longTail: true, thresholds });
     const ct = classifyContentType({ keyword });
-    return {
+    records.push({
       keyword,
       market: market.code,
       aiTitleIdea: s.titleIdea || null,
@@ -766,11 +832,11 @@ async function handleExpandSeed(seed, marketCode) {
       estimatedMonthlySales: null,
       verdict: scored.verdict,
       qualifies: computeSuggestionQualifies(scored, thresholds, keyword)
-    };
-  });
+    });
+  }
 
   if (settings.autocompleteEnabled !== false) {
-    const suggestionRows = suggestions
+    const suggestionRows = candidates
       .filter((s) => s.source === 'amazon-autocomplete' || s.source === 'google-suggest')
       .map((s) => ({
         id: `${s.source}:${s.keyword}:${market.code}`,
@@ -788,8 +854,9 @@ async function handleExpandSeed(seed, marketCode) {
 
   return {
     keywords: records.map((r) => r.keyword),
-    ai: suggestions,
+    ai: candidates,
     count: records.length,
+    dropped: skippedCt,
     proxy: seedProxy
   };
 }

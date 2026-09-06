@@ -100,10 +100,17 @@ function bestPosition(term, corpus) {
  * would be prohibitively chatty. Instead each suggestion inherits the depth of
  * its seed's neighborhood (`seedProxyScore`) and gains position weight from
  * where it actually appears in the soup + cross-engine confirmation.
+ *
+ * Returns `null` when the term appears in NEITHER engine's soup — there is no
+ * signal at all here, and the caller must either probe the term directly or
+ * leave it "not yet measured" instead of inheriting a shared constant that
+ * would make every unrelated suggestion look identically interesting
+ * (the duplicate-tuple bug from Revision 2).
  */
 export function deriveSuggestionProxy(term, corpus = {}, seedProxyScore = 0) {
   const amazonPos = bestPosition(term, corpus.amazon);
   const googlePos = bestPosition(term, corpus.google);
+  if (amazonPos == null && googlePos == null) return null;
 
   const posSignal =
     amazonPos != null && googlePos != null

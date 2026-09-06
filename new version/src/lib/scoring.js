@@ -66,6 +66,8 @@ export function computeTopConcentration(listings = []) {
 export function computeListingsStats(listings = []) {
   const ranks = listings.map((l) => l.bsr).filter((v) => v != null);
   const medRank = median(ranks);
+  const totalReviews = listings.reduce((a, l) => a + (l.reviewCount || 0), 0);
+  const topReviews = Math.max(...listings.map((l) => l.reviewCount || 0));
   return {
     listingCount: listings.length,
     sampleSize: listings.length,
@@ -74,10 +76,11 @@ export function computeListingsStats(listings = []) {
     lowPrice: Math.min(...listings.map((l) => l.price).filter((v) => v != null)),
     highPrice: Math.max(...listings.map((l) => l.price).filter((v) => v != null)),
     avgReviewCount: avg(listings, (l) => l.reviewCount),
-    highReviews: Math.max(...listings.map((l) => l.reviewCount || 0)),
+    highReviews: topReviews,
     lowReviews: Math.min(...listings.map((l) => l.reviewCount || 0)),
     avgRating: avg(listings, (l) => l.avgRating),
-    totalReviews: listings.reduce((a, l) => a + (l.reviewCount || 0), 0),
+    totalReviews,
+    leaderDominanceRatio: totalReviews > 0 ? clamp(topReviews / totalReviews, 0, 1) : null,
     avgBsr: avg(ranks),
     medianRank: medRank,
     medianRankBelow: medRank != null ? median(ranks.filter((r) => r > medRank)) : null,
@@ -245,9 +248,19 @@ export function computeQualifies(metrics = {}, thresholds = {}) {
   const volumeThreshold = thresholds.volumeThreshold ?? 50;
   const contentTypeEnabled = thresholds.contentTypeEnabled !== false;
 
+  // Gap F (Revision 2): a niche where one single title owns the majority of
+  // all reviews is a branded/single-work-driven term, not a generalizable
+  // demand pool -- exclude it once the evidence floor is met.
+  const leaderDominates =
+    metrics.leaderDominanceRatio != null &&
+    metrics.leaderDominanceRatio >= 0.6 &&
+    (metrics.totalReviews || 0) >= 30 &&
+    (metrics.sampleSize || 0) >= 5;
+
   const excluded =
     metrics.contentType === 'high-content-excluded' ||
-    metrics.requiresExpertise === true;
+    metrics.requiresExpertise === true ||
+    leaderDominates;
 
   const q = {
     bsr: metrics.bestSubcategoryBsr != null
