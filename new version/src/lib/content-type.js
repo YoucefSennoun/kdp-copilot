@@ -4,10 +4,11 @@
  * Decides whether a keyword's niche is something an indie KDP publisher can
  * realistically produce — low-content (journals, planners, logbooks, notebooks,
  * calendars, trackers), medium-content (coloring / activity / puzzle /
- * guided-workbook), personalized/name-variant, and researched-and-compiled
- * guides — versus high-content work that requires being a novelist, memoirist,
- * or subject-matter expert (medical, biological, scientific, technical, legal,
- * academic non-fiction).
+ * guided-workbook), personalized/name-variant, researched-and-compiled guides,
+ * and — when `allowFiction` is on — SPECIFIC long-tail fiction niches
+ * ("cozy mysteries for seniors") — versus high-content work that requires
+ * being a novelist, memoirist, or subject-matter expert (medical, biological,
+ * scientific, technical, legal, academic non-fiction, and writer-craft books).
  *
  * Signals (in descending strength):
  *   1. keyword text  — strongest; a "journal"/"coloring book" keyword wins even
@@ -232,8 +233,65 @@ export const HIGH_CONTENT_SIGNALS = [
   { phrase: 'by dr', expertise: true },
   { phrase: 'by md', expertise: true },
   { phrase: 'm d', expertise: true },
-  { phrase: 'ph d', expertise: true }
+  { phrase: 'ph d', expertise: true },
+
+  // Writer-craft / publishing guides — books ABOUT becoming a writer sell to
+  // the author audience, not to end-buyers of the niche. Deny unless a STRONG
+  // low/medium family token coexists ("novel writing planner" is a real
+  // planner; "how to write a book" is a high-content book).
+  { phrase: 'write a book', expertise: false },
+  { phrase: 'writing a book', expertise: false },
+  { phrase: 'how to write', expertise: false },
+  { phrase: 'how to publish', expertise: false },
+  { phrase: 'become an author', expertise: false },
+  { phrase: 'becoming an author', expertise: false },
+  { phrase: 'for authors', expertise: false },
+  { phrase: 'for writers', expertise: false },
+  { phrase: 'book marketing', expertise: false },
+  { phrase: 'author marketing', expertise: false },
+  { phrase: 'self publishing', expertise: false },
+  { phrase: 'self-publishing', expertise: false },
+  { phrase: 'get published', expertise: false },
+  { phrase: 'publishing guide', expertise: false },
+  { phrase: 'author platform', expertise: false },
+  { phrase: 'sell more books', expertise: false }
 ];
+
+/**
+ * Fiction sub-genre / audience framing that makes a NOVEL niche specific
+ * enough to be its own long-tail product ("cozy mysteries for seniors" is a
+ * niche; "romance novels" is not). Used ONLY for the narrow-fiction carve-out.
+ */
+export const FICTION_SUBGENRE_SIGNALS = [
+  'cozy', 'cozy mystery', 'regency', 'paranormal', 'paranormal romance',
+  'shifter', 'werewolf', 'vampire', 'sweet romance', 'gay romance',
+  'lesbian romance', 'amish romance', 'norse', 'space opera', 'cyberpunk',
+  'dystopian', 'litrpg', 'urban fantasy', 'slice of life', 'murder mystery',
+  'beta-male', 'small town', 'instalove', 'enemies to lovers',
+  'historical romance', 'dark romance', 'clean romance', 'wholesome',
+  'cozy fantasy', 'romantasy', 'new adult', 'young adult',
+  'chapter book', 'chapter books', 'bedtime story', 'bedtime stories',
+  'fairy tale', 'fairy tales', 'nursery rhymes'
+];
+
+const FICTION_HEADWORDS = [
+  'novel', 'novels', 'fiction', 'narrative', 'story book', 'storybook', 'romance'
+];
+
+/** "cozy mysteries for seniors" / "chapter books for girls" — narrow & specific. */
+function isSpecificFictionKeyword(kw) {
+  const words = String(kw || '').trim().split(/\s+/).filter(Boolean).length;
+  const subgenre = FICTION_SUBGENRE_SIGNALS.some((p) => hasPhrase(kw, p));
+  const audience =
+    /\bfor\s+(women|men|adults|teens|seniors|kids|girls|boys|toddlers|children|couples|moms|dads|him|her|brides|grooms)\b/.test(kw) ||
+    /\bfor\s+(\w+)\s+(readers|romance|mystery|listeners)\b/.test(kw);
+  return words >= 3 && (subgenre || audience);
+}
+
+function isFictionish(kw) {
+  return FICTION_HEADWORDS.some((p) => hasPhrase(kw, p)) ||
+    FICTION_SUBGENRE_SIGNALS.some((p) => hasPhrase(kw, p));
+}
 
 /**
  * Category breadcrumb deny patterns (checked after BSR enrichment). Matching
@@ -361,6 +419,7 @@ function result(contentType, label, source, confidence, requiresExpertise = fals
  * @param {string[]} input.categories - category breadcrumb names (post-enrichment)
  * @param {number|null} input.kindleShare - 0-1 share of sample with Kindle edition
  * @param {number} input.sampleSize - scraped cards in the sample
+ * @param {boolean} [input.allowFiction=true] - admit specific long-tail fiction niches
  * @returns {{contentType:string, contentTypeLabel:string, contentTypeSource:string,
  *            confidence:string, requiresExpertise:boolean}}
  */
@@ -369,7 +428,8 @@ export function classifyContentType({
   titles = [],
   categories = [],
   kindleShare = null,
-  sampleSize = 0
+  sampleSize = 0,
+  allowFiction = true
 } = {}) {
   const kw = normalize(keyword);
   const nTitles = (titles || []).length;
@@ -385,13 +445,21 @@ export function classifyContentType({
   //    low/medium content signal genuinely coexists ("clinical trial logbook"
   //    is a real logbook; "clinical handbook of diabetes" is a real textbook).
   //    Strong = journal/planner/activity/workbook etc.; weak = guide-type.
-  if (kwHigh.length) {
+  if (kwHigh.length || isFictionish(kw)) {
     const anyExpert = kwHigh.some((s) => s.expertise);
     const strongLow = kwLow.some((s) => s.kind !== 'guide');
     if (!strongLow) {
+      // Narrow-fiction carve-out (Revision 2 / v0.5): a LONG-TAIL, audience-
+      // specific fiction niche ("cozy mysteries for seniors", "chapter books
+      // for girls") is a real, indie-producible product. Generic "romance
+      // novels" is not. Only when the user allows fiction.
+      if (!anyExpert && allowFiction && isFictionish(kw) && isSpecificFictionKeyword(kw)) {
+        return result('fiction', 'Fiction niche (specific)', 'title-regex', 'medium', false);
+      }
+      const writerCraft = /write a book|writing a book|how to write|how to publish|become an author|for authors|for writers|book marketing|author marketing|self[- ]?publishing|get published|publishing guide|author platform|sell more books/i.test(kw);
       return result(
         'high-content-excluded',
-        anyExpert ? 'Expertise-required non-fiction' : 'High-content (fiction / narrative)',
+        anyExpert ? 'Expertise-required non-fiction' : (writerCraft ? 'Writer-craft / publishing guide' : 'High-content (fiction / narrative)'),
         'title-regex',
         'high',
         anyExpert

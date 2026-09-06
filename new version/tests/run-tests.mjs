@@ -362,5 +362,38 @@ console.log('\n[10] leader-dominance fingerprint (single-work-driven terms)');
   assert(healthy.contentType === true && healthy.all === true, 'spread review share → still qualifies');
 }
 
+console.log('\n[11] v0.5: narrow-fiction carve-out + writer-craft denial');
+{
+  const cozy = classifyContentType({ keyword: 'cozy mysteries for seniors' });
+  assert(cozy.contentType === 'fiction' && cozy.requiresExpertise === false, 'specific long-tail fiction → fiction-niche (publishable)');
+
+  const chapters = classifyContentType({ keyword: 'chapter books for girls 6 to 8' });
+  assert(chapters.contentType === 'fiction', 'chapter books for a stated age → fiction-niche');
+
+  const broad = classifyContentType({ keyword: 'romance novels' });
+  assert(broad.contentType === 'high-content-excluded', 'generic fiction term stays excluded');
+
+  const off = classifyContentType({ keyword: 'cozy mysteries for seniors', allowFiction: false });
+  assert(off.contentType === 'high-content-excluded', 'fiction carve-out disabled → excluded again');
+
+  const med = classifyContentType({ keyword: 'medical romance novel' });
+  assert(med.contentType === 'high-content-excluded', 'expertise + fiction overlap stays excluded');
+
+  const wc1 = classifyContentType({ keyword: 'how to write a book' });
+  assert(wc1.contentType === 'high-content-excluded', 'writer-craft guide → excluded');
+
+  const wc2 = classifyContentType({ keyword: 'book marketing for authors' });
+  assert(wc2.contentType === 'high-content-excluded', 'publishing-marketing guide → excluded');
+
+  const keep = classifyContentType({ keyword: 'novel writing planner' });
+  assert(keep.contentType === 'low-content', 'planner family overrides writer-craft text → low-content');
+
+  const keep2 = classifyContentType({ keyword: 'planner for self published authors' });
+  assert(keep2.contentType === 'low-content', 'planner for the author audience is still a planner');
+
+  const unk = classifyContentType({ keyword: 'space opera romance for adults' });
+  assert(unk.contentType === 'fiction', 'subgenre + audience fiction → fiction-niche');
+}
+
 console.log(`\n${passed} passed, ${failed} failed`);
 process.exit(failed ? 1 : 0);

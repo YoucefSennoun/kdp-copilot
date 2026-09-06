@@ -705,19 +705,23 @@ async function handleExpandSeed(seed, marketCode) {
   const corpus = await collectAutocompleteCorpus(seed, market.code, settings).catch(() => ({ amazon: [], google: [] }));
   const seedProxy = computeDemandProxyScore({ amazon: corpus.amazon, google: corpus.google });
 
+  const allowFiction = settings.allowNicheFiction !== false;
+
   let suggestions;
   if (apiKey) {
     suggestions = await expandNicheSeeds({
       apiKey,
       seed,
       market,
-      count: 12
+      count: 12,
+      allowFiction
     });
   } else {
     suggestions = await localExpandSuggestions({
       amazonWords: corpus.amazon.map((e) => e.term),
       googleWords: corpus.google.map((e) => e.term),
-      seed
+      seed,
+      allowFiction
     });
   }
 
@@ -733,7 +737,7 @@ async function handleExpandSeed(seed, marketCode) {
   // corpus-verified, so they only lose the hard-excluded class.
   const isExistingTitle = (s) => s && s.isExistingTitle === true;
   const classifyDrop = (kw, { dropUnknown }) => {
-    const ct = classifyContentType({ keyword: kw });
+    const ct = classifyContentType({ keyword: kw, allowFiction });
     if (ct.contentType === 'high-content-excluded' || ct.requiresExpertise) return true;
     if (dropUnknown && ct.contentType === 'unknown') return true;
     return false;
@@ -801,7 +805,7 @@ async function handleExpandSeed(seed, marketCode) {
       probed
     };
     const scored = scoreKeyword(keyword, { demandProxyScore, sampleSize: 0 }, { longTail: true, thresholds });
-    const ct = classifyContentType({ keyword });
+    const ct = classifyContentType({ keyword, allowFiction });
     records.push({
       keyword,
       market: market.code,
@@ -831,7 +835,7 @@ async function handleExpandSeed(seed, marketCode) {
       confidence: scored.confidence,
       estimatedMonthlySales: null,
       verdict: scored.verdict,
-      qualifies: computeSuggestionQualifies(scored, thresholds, keyword)
+      qualifies: computeSuggestionQualifies(scored, thresholds, keyword, allowFiction)
     });
   }
 
@@ -861,8 +865,8 @@ async function handleExpandSeed(seed, marketCode) {
   };
 }
 
-function computeSuggestionQualifies(scored, thresholds, keyword) {
-  const ct = classifyContentType({ keyword: keyword || '' });
+function computeSuggestionQualifies(scored, thresholds, keyword, allowFiction = true) {
+  const ct = classifyContentType({ keyword: keyword || '', allowFiction });
   const excluded =
     ct.contentType === 'high-content-excluded' || ct.requiresExpertise;
   return {
@@ -947,7 +951,8 @@ async function expandFromSuggestions(marketCode) {
 
   const records = unique.map((s) => {
     const scored = scoreKeyword(s.keyword, {}, { longTail: true, thresholds });
-    const ct = classifyContentType({ keyword: s.keyword });
+    const allowFiction = settings.allowNicheFiction !== false;
+    const ct = classifyContentType({ keyword: s.keyword, allowFiction });
     return {
       keyword: s.keyword,
       market: market.code,
@@ -971,7 +976,7 @@ async function expandFromSuggestions(marketCode) {
       confidence: scored.confidence,
       estimatedMonthlySales: null,
       verdict: scored.verdict,
-      qualifies: computeSuggestionQualifies(scored, thresholds, s.keyword)
+      qualifies: computeSuggestionQualifies(scored, thresholds, s.keyword, settings.allowNicheFiction !== false)
     };
   });
 

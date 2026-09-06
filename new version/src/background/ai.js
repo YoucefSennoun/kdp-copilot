@@ -122,7 +122,9 @@ function buildExpansionPrompt(seed, market, count) {
     `- medium-content: coloring books, activity books, puzzle books (crosswords, word search, sudoku, mazes), workbooks, practice/handwriting books, flash cards`,
     `- personalized/name-variant books (e.g. "for a girl named…")`,
     `- researched-and-compiled guides: checklists, templates, curated how-to compilations, recipe collections, beginner guides a layperson can compile`,
-    `NEVER propose fiction, novels, short stories, memoirs, biographies, poetry, essays, or expertise-required textbooks/clinical/scientific/legal/academic works.`,
+    `- NARROW FICTION niches (optional): only when the niche names a specific sub-genre AND a concrete audience/setting (e.g. "cozy mysteries for seniors", "chapter books for girls 6-8", "sci-fi romance for adults"). Generic "novels", "romance", "fiction" broad terms are NEVER acceptable.`,
+    `NEVER propose memoirs, biographies, essays, short-story anthologies, poetry, or expertise-required textbooks/clinical/scientific/legal/academic works.`,
+    `Never propose books whose subject is BECOMING a writer or self-publishing (e.g. "how to write a book", "book marketing for authors") -- those sell to authors, not to niche buyers. A planner/journal/workbook FOR that audience is fine ("novel writing planner").`,
     `A health-adjacent niche is allowed ONLY in its compiled/lay form (e.g. "diabetes-friendly recipes", "first-trimester guide") -- never clinical reference material.`,
     `Prefer long-tail keywords with real buyer intent over broad head terms.`,
     ``,
@@ -144,7 +146,7 @@ function buildExpansionPrompt(seed, market, count) {
           why: 'one sentence on why this niche is winnable',
           titleIdea: 'a marketable book title that hits this keyword',
           demandSignal: 'low | medium | high',
-          contentType: 'low-content | medium-content | personalized | guide',
+          contentType: 'low-content | medium-content | personalized | guide | fiction-niche',
           isExistingTitle: false
         }
       ]
@@ -153,13 +155,13 @@ function buildExpansionPrompt(seed, market, count) {
   ].join('\n');
 }
 
-export async function expandNicheSeeds({ apiKey, seed, market, count = 10 }) {
+export async function expandNicheSeeds({ apiKey, seed, market, count = 10, allowFiction = true }) {
   const prompt = buildExpansionPrompt(seed, market, count);
   const data = await callGemini({ apiKey, prompt });
   const niches = Array.isArray(data) ? data : data?.niches;
   if (!Array.isArray(niches)) throw new Error('Model response missing "niches" array.');
   return niches
-    .filter(isSuggestibleSuggestion)
+    .filter((s) => isSuggestibleSuggestion(s, { allowFiction }))
     .slice(0, count);
 }
 
@@ -169,12 +171,12 @@ export async function expandNicheSeeds({ apiKey, seed, market, count = 10 }) {
  * suggestions that trip the high-content classifier, and phrasing tells that
  * indicate a real book ("by <Author>", "bestseller", "classic").
  */
-export function isSuggestibleSuggestion(s = {}) {
+export function isSuggestibleSuggestion(s = {}, { allowFiction = true } = {}) {
   if (s.isExistingTitle === true) return false;
 
   const keyword = String(s.keyword || '').trim();
   const titleIdea = String(s.titleIdea || '').trim();
-  const ct = classifyContentType({ keyword: `${keyword} ${titleIdea}`.trim() });
+  const ct = classifyContentType({ keyword: `${keyword} ${titleIdea}`.trim(), allowFiction });
   if (ct.contentType === 'high-content-excluded') return false;
 
   const why = String(s.why || '');
@@ -430,7 +432,7 @@ function matchesSeed(seed, word) {
  * Expand beyond a seed using real Amazon + Google autocomplete data.
  * Builds an "alphabet soup" style set of adjacent commercial search terms.
  */
-export async function localExpandSuggestions({ amazonWords, googleWords, seed }) {
+export async function localExpandSuggestions({ amazonWords, googleWords, seed, allowFiction = true }) {
   const seen = new Set();
   const out = [];
 
@@ -440,7 +442,7 @@ export async function localExpandSuggestions({ amazonWords, googleWords, seed })
     if (clean === (seed || '').trim().toLowerCase()) return;
     if (matchesSeed(seed, clean)) {
       seen.add(clean);
-      out.push({ keyword: clean, source, score: computeSuggestionRelevance(clean, seed) });
+      out.push({ keyword: clean, source, score: computeSuggestionRelevance(clean, seed, allowFiction) });
     }
   };
 
@@ -457,7 +459,7 @@ export async function localExpandSuggestions({ amazonWords, googleWords, seed })
  * long-tail length, and commercial-intent markers. Used to rank suggestions
  * AND to persist a per-keyword "interest proxy" weight (Phase 3).
  */
-export function computeSuggestionRelevance(word, seed) {
+export function computeSuggestionRelevance(word, seed, allowFiction = true) {
   const seedParts = (seed || '').toLowerCase().trim().split(/\s+/).filter(Boolean);
   const wParts = word.split(/\s+/);
   const shared = wParts.filter((p) => seedParts.includes(p)).length;
@@ -470,13 +472,15 @@ export function computeSuggestionRelevance(word, seed) {
 
   // Phase 1.5: deprioritize high-content suggestions (novels, clinical texts,
   // academic works) an indie cannot produce; slightly reward the ones we can.
-  const ct = classifyContentType({ keyword: word });
+  // Narrow-fiction niches count as publishable when allowed.
+  const ct = classifyContentType({ keyword: word, allowFiction });
   if (ct.contentType === 'high-content-excluded') score -= 0.35;
   else if (ct.contentType !== 'unknown') score += 0.05;
 
   // Revision 2: explicit tells the classifier's phrase list can miss when the
-  // token is glued to punctuation/case the signals don't cover.
-  if (/\b(novel|novels|fiction|memoir|memoirs|biography|biographies|poetry|essays)\b/i.test(word)) score -= 0.1;
+  // token is glued to punctuation/case the signals don't cover. Fiction-word
+  // penalties are left to the classifier so allowed narrow-fiction niches
+  // aren't double-penalized.
   if (/\b(clinical|diagnos|patholog|textbook|dissertation|thesis)\w*/i.test(word)) score -= 0.1;
   if (/\b(m\.?d\.?|ph\.?d\.?|esq\.?|m d|ph d)\b/i.test(word)) score -= 0.1;
 

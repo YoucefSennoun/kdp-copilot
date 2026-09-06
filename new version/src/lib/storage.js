@@ -213,6 +213,7 @@ export const DEFAULT_SETTINGS = {
   listingsThreshold: 1000,      // true Amazon total result count must be <= this
   volumeThreshold: 50,          // demandProxyScore (0-100) must be >= this
   contentTypeEnabled: true,     // KDP-publishable content filter (Phase 1.5)
+  allowNicheFiction: true,      // permit specific long-tail fiction niches (v0.5)
 
   // BSR enrichment pipeline (Phase 2)
   enrichmentEnabled: true,

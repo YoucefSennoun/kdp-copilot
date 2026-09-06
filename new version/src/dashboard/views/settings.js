@@ -32,6 +32,7 @@ function fillForm(s) {
   $('listings-threshold').value = s.listingsThreshold ?? 1000;
   $('volume-threshold').value = s.volumeThreshold ?? 50;
   $('opt-contentfilter').checked = s.contentTypeEnabled !== false;
+  $('opt-niche-fiction').checked = s.allowNicheFiction !== false;
 
   $('opt-enrichment').checked = s.enrichmentEnabled !== false;
   $('enrichment-size').value = String(s.enrichmentSampleSize ?? 8);
@@ -58,6 +59,7 @@ async function handleSave() {
     listingsThreshold: parseInt($('listings-threshold').value, 10) || 1000,
     volumeThreshold: parseInt($('volume-threshold').value, 10) || 50,
     contentTypeEnabled: $('opt-contentfilter').checked,
+    allowNicheFiction: $('opt-niche-fiction').checked,
 
     enrichmentEnabled: $('opt-enrichment').checked,
     enrichmentSampleSize: parseInt($('enrichment-size').value, 10) || 8,
