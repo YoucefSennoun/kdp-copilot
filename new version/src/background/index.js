@@ -38,7 +38,8 @@ import {
   getScrapeSnapshots,
   addDiscoveryRun,
   getDiscoveryRuns,
-  clearDiscoveryRuns
+  clearDiscoveryRuns,
+  purgeOutsideScope
 } from '../lib/storage.js';
 import { scrapeQueue, STATUS } from './scrape-queue.js';
 import {
@@ -222,6 +223,10 @@ async function handleMessage(message, sender = {}) {
       return getKeyword(k('keyword'));
     case 'DELETE_KEYWORD':
       return deleteKeyword(k('keyword'));
+    case 'PURGE_OUTSIDE_SCOPE': {
+      const s = await getSettings();
+      return purgeOutsideScope(s.contentScope || 'strict');
+    }
     case 'CLEAR_KEYWORDS':
       return clearKeywords();
     case 'CLEAR_ALL':

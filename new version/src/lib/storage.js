@@ -1,6 +1,8 @@
 const DB_NAME = 'kdp-copilot';
 const DB_VERSION = 5;
 
+import { classifyContentType, scopeAllows } from './content-type.js';
+
 const STORES = {
   keywords: { keyPath: 'keyword' },
   suggestions: { keyPath: 'id' },
@@ -85,6 +87,22 @@ export async function deleteKeyword(keyword) {
 
 export async function clearKeywords() {
   return withTx('keywords', 'readwrite', (store) => store.clear());
+}
+
+// Physical cleanup: delete every stored keyword that fails the given content
+// scope. 'strict' keeps only Amazon "generally low-content" families; the
+// standard scope keeps anything not explicitly high-content-excluded.
+export async function purgeOutsideScope(scope = 'strict') {
+  const all = await getAllKeywords();
+  const doomed = [];
+  for (const rec of all) {
+    if ((rec.keyword || '').startsWith('dp/')) continue;
+    const ct = classifyContentType({ keyword: rec.keyword || '', scope });
+    const ok = scopeAllows(ct, scope);
+    if (!ok) doomed.push(rec.keyword);
+  }
+  for (const keyword of doomed) await deleteKeyword(keyword);
+  return { removed: doomed.length, scanned: all.length };
 }
 
 // ---- Suggestions (Amazon + Google autocomplete, alphabet soup) ----

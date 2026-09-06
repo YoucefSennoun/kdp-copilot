@@ -47,6 +47,13 @@ export function isLowContentNiche(result) {
   return !!result && result.contentType === 'low-content';
 }
 
+/** Pure scope-decision used by the storage scrub and the dashboard gate. */
+export function scopeAllows(result, scope = CONTENT_SCOPE.STRICT) {
+  if (!result) return false;
+  if (scope === CONTENT_SCOPE.STRICT) return isLowContentNiche(result);
+  return result.contentType !== 'high-content-excluded' && !result.requiresExpertise;
+}
+
 /**
  * KDP-friendly content signals, each ~ a kind ('low' | 'medium' | 'guide').
  * Longest/most specific phrases should come before short generic ones when

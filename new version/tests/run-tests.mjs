@@ -18,7 +18,7 @@ import {
   computeDemandProxyScore,
   deriveSuggestionProxy
 } from '../src/lib/proxy.js';
-import { classifyContentType, isLowContentNiche } from '../src/lib/content-type.js';
+import { classifyContentType, isLowContentNiche, scopeAllows } from '../src/lib/content-type.js';
 import { isSuggestibleSuggestion } from '../src/background/ai.js';
 
 let passed = 0;
@@ -450,6 +450,31 @@ console.log('\n[12] v0.6 strict scope: Amazon "generally low-content" list only'
 
   const standardColoring = classifyContentType({ keyword: 'coloring book for adults animals', scope: 'standard' });
   assert(standardColoring.contentType === 'medium-content', 'standard scope still allows coloring books');
+}
+
+console.log('\n[13] v0.6: scopeAllows scrub decision (storage cleanup + dashboard gate)');
+{
+  assert(
+    scopeAllows(classifyContentType({ keyword: 'gratitude journal', scope: 'strict' })),
+    'journal passes strict scrub'
+  );
+  assert(
+    !scopeAllows(classifyContentType({ keyword: 'cozy mysteries for seniors', scope: 'strict' })),
+    'fiction fails strict scrub'
+  );
+  assert(
+    !scopeAllows(classifyContentType({ keyword: 'coloring book for adults animals', scope: 'strict' })),
+    'coloring fails strict scrub'
+  );
+  assert(
+    scopeAllows(classifyContentType({ keyword: 'coloring book for adults animals', scope: 'standard' }), 'standard'),
+    'coloring passes standard scrub'
+  );
+  assert(
+    !scopeAllows(classifyContentType({ keyword: 'the intelligent investor', scope: 'strict' })),
+    'legacy existing-book title fails strict scrub'
+  );
+  assert(!scopeAllows(null), 'null result never allows');
 }
 
 console.log(`\n${passed} passed, ${failed} failed`);

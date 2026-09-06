@@ -121,3 +121,17 @@ function renderNicheTable() {
 }
 
 $('niche-refresh').addEventListener('click', refresh);
+
+$('niche-scrub').addEventListener('click', async () => {
+  const btn = $('niche-scrub');
+  btn.disabled = true;
+  try {
+    const { removed } = await send('PURGE_OUTSIDE_SCOPE');
+    $('niche-status').textContent = removed
+      ? `Removed ${removed} stored keyword${removed === 1 ? '' : 's'} that don't fit ${thresholds.contentScope} scope.`
+      : 'No out-of-scope keywords found — stored list is clean.';
+    await refresh();
+  } finally {
+    btn.disabled = false;
+  }
+});
