@@ -1,0 +1,379 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>KDP Copilot</title>
+    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/@picocss/pico@2/css/pico.min.css" />
+    <style>
+      :root {
+        --pico-font-size: 15px;
+      }
+      body {
+        padding: 1.5rem 2rem 3rem;
+        max-width: 1280px;
+        margin: 0 auto;
+      }
+      header {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        gap: 1rem;
+        margin-bottom: 1.25rem;
+        flex-wrap: wrap;
+      }
+      hgroup h1 { margin-bottom: 0; }
+      header nav, header nav ul { margin: 0; }
+      nav a { cursor: pointer; }
+      .tab-content { display: none; }
+      .tab-content.active { display: block; }
+      .muted, .muted a { color: var(--pico-muted-color); }
+      .inline-grid { display: flex; gap: 0.5rem; align-items: flex-end; flex-wrap: wrap; margin-bottom: 0.5rem; }
+      .inline-grid select { width: auto; }
+      .inline-grid input[type="text"] { flex: 1; min-width: 240px; }
+      .score-badge { font-weight: 700; white-space: nowrap; }
+      .verdict-chip {
+        display: inline-block;
+        padding: 1px 6px;
+        border-radius: 4px;
+        font-size: 0.78rem;
+        font-weight: 600;
+      }
+      .tone-excellent { background: #2e7d32; color: #fff; }
+      .tone-good { background: #66bb6a; color: #fff; }
+      .tone-fair { background: #f9a825; color: #222; }
+      .tone-poor { background: #e53935; color: #fff; }
+      .tone-muted { background: #90a4ae; color: #fff; }
+      table th.sortable { cursor: pointer; user-select: none; }
+      th.sortable::after { content: '↕'; opacity: 0.4; margin-left: 3px; }
+      th.sortable.asc::after { content: '▲'; opacity: 0.9; }
+      th.sortable.desc::after { content: '▼'; opacity: 0.9; }
+      .queue-bar { display: flex; align-items: center; gap: 0.6rem; margin: 0.4rem 0 0.9rem; font-size: 0.85rem; }
+      .progress-track { flex: 1; height: 8px; background: var(--pico-card-background-color, #eaecec); border-radius: 4px; overflow: hidden; }
+      .progress-fill { height: 100%; width: 0; background: #f5a623; transition: width 0.3s ease; }
+      .detail-drawer { margin-top: 1rem; }
+      .detail-drawer h3 { margin-top: 0; }
+      .product-grid {
+        display: grid;
+        grid-template-columns: repeat(auto-fill, minmax(220px, 1fr));
+        gap: 0.75rem;
+      }
+      .product-card { padding: 0.75rem; border: 1px solid var(--pico-card-border-color, #d5d9d9); border-radius: 8px; font-size: 0.85rem; }
+      .product-card h4 { margin: 0 0 0.4rem; font-size: 0.92rem; }
+      .product-card .meta { margin: 0.2rem 0; color: var(--pico-muted-color); }
+      .ai-output { white-space: pre-wrap; background: var(--pico-card-background-color, #fafafa); padding: 0.9rem; border-radius: 8px; font-size: 0.88rem; }
+      .pill-row { display: flex; gap: 0.4rem; flex-wrap: wrap; margin: 0.5rem 0; }
+      .pill { background: #f5d9a3; padding: 2px 8px; border-radius: 10px; font-size: 0.8rem; color: #222; }
+      .chip { display: inline-block; margin-left: 5px; padding: 1px 7px; border-radius: 4px; font-size: 0.7rem; font-weight: 700; background: #dfe8f0; color: #1a5276; vertical-align: middle; }
+      .chip-bad { background: #fbdcd9; color: #c0392b; }
+      .loading { opacity: 0.6; }
+      .suggestions-panel .source-tag { font-size: 0.7rem; text-transform: uppercase; letter-spacing: 0.4px; background: #e3e6ed; border-radius: 3px; padding: 1px 5px; }
+      .legal-badge {
+        display: inline-block;
+        margin-left: 5px;
+        padding: 1px 6px;
+        border-radius: 4px;
+        font-size: 0.68rem;
+        font-weight: 700;
+        vertical-align: middle;
+        text-transform: uppercase;
+        letter-spacing: 0.3px;
+      }
+      .legal-badge.high { background: #e53935; color: #fff; }
+      .legal-badge.medium { background: #f9a825; color: #222; }
+      .legal-badge.low { background: #2e7d32; color: #fff; }
+      .legal-modal-backdrop {
+        position: fixed; inset: 0;
+        background: rgba(0, 0, 0, 0.45);
+        display: flex; align-items: center; justify-content: center;
+        z-index: 100;
+      }
+      .legal-modal {
+        background: var(--pico-card-background-color, #fff);
+        color: var(--pico-color, #111);
+        max-width: 580px; width: 92%;
+        border-radius: 10px; padding: 1.25rem;
+        max-height: 82vh; overflow: auto;
+      }
+      .legal-modal h2 { margin-top: 0; }
+      .legal-risk { font-weight: 700; text-transform: uppercase; letter-spacing: 0.5px; font-size: 0.85rem; }
+      .legal-risk.low { color: #2e7d32; }
+      .legal-risk.medium { color: #f9a825; }
+      .legal-risk.high { color: #e53935; }
+      .legal-flag { padding: 0.45rem 0.6rem; border-left: 3px solid #e53935; background: rgba(229, 57, 53, 0.08); border-radius: 4px; margin: 0.4rem 0; font-size: 0.88rem; }
+      .legal-safekeyword { padding: 0.5rem 0.6rem; background: rgba(46, 125, 50, 0.1); border-left: 3px solid #2e7d32; border-radius: 4px; font-size: 0.88rem; }
+      .legal-note { margin: 0.2rem 0; font-size: 0.85rem; color: var(--pico-muted-color); }
+      .qual-chip { display: inline-block; padding: 1px 6px; border-radius: 4px; font-size: 0.7rem; font-weight: 700; }
+      .qual-ok { background: #2e7d32; color: #fff; }
+      .qual-bad { background: #e0e0e0; color: #666; }
+      .stage-text { font-weight: 600; }
+    </style>
+  </head>
+  <body>
+    <header>
+      <hgroup>
+        <h1>KDP Copilot</h1>
+        <p class="muted">Amazon KDP Niche &amp; Keyword Research — BSR + real result counts + interest proxy + Gemini AI</p>
+      </hgroup>
+      <nav>
+        <ul>
+          <li><a data-view="explorer" class="active">Explorer</a></li>
+          <li><a data-view="niches">Niche Finder</a></li>
+          <li><a data-view="suggestions">Suggestions</a></li>
+          <li><a data-view="settings">Settings</a></li>
+        </ul>
+      </nav>
+    </header>
+
+    <main>
+      <section id="view-explorer" class="tab-content active">
+        <div class="inline-grid">
+          <input id="seed-input" type="text" placeholder="Seed keyword, e.g. 'low carb cookbook'" />
+          <div>
+            <label for="market-select" class="muted" style="font-size:.8rem;">Market</label>
+            <select id="market-select"></select>
+          </div>
+          <button id="go-btn">Expand &amp; Auto-Scrape</button>
+          <button id="discover-btn" class="outline" title="No seed needed — pull live-selling titles from Amazon Best Sellers / Movers pages">Discover Niches</button>
+          <button id="find-me-btn" class="outline" title="Discover → scrape → BSR-enrich → score → qualify in one run">Find Me Niches</button>
+          <button id="suggest-btn" class="secondary outline">Fetch Autocomplete</button>
+          <button id="scrape-all-btn" class="secondary outline">Scrape Unscraped</button>
+          <button id="export-btn" class="secondary">Export CSV</button>
+          <button id="refresh-btn" class="secondary outline">Refresh</button>
+          <button id="start-over-btn" class="contrast outline" title="Clear all keywords, suggestions and analyses to start a fresh niche search">Start Over</button>
+        </div>
+
+        <div id="queue-bar" class="queue-bar">
+          <span id="queue-status" class="muted">Idle</span>
+          <div class="progress-track"><div id="queue-fill" class="progress-fill"></div></div>
+          <button id="pause-btn" class="contrast outline" style="width:auto; margin:0; font-size:.8rem; padding:2px 8px;">Pause</button>
+        </div>
+
+        <div id="status" class="muted" style="margin-bottom:0.75rem;"></div>
+
+        <article class="detail-drawer" id="detail-drawer" hidden></article>
+
+        <article>
+          <table id="keywords-table">
+            <thead>
+              <tr>
+                <th>Keyword</th>
+                <th>Mkt</th>
+                <th class="sortable" data-sort="score">Score</th>
+                <th class="sortable" data-sort="demand">Demand</th>
+                <th class="sortable" data-sort="competition">Comp.</th>
+                <th class="sortable" data-sort="margin">Margin</th>
+                <th class="sortable" data-sort="confidence">Conf.</th>
+                <th>Est. Sales</th>
+                <th style="min-width:110px;">Results</th>
+                <th class="sortable" data-sort="scrapedAt">Scraped</th>
+                <th>Actions</th>
+              </tr>
+            </thead>
+            <tbody id="keywords-body">
+              <tr><td colspan="11" class="muted">No keywords yet. Expand a seed, browse Amazon, or click "Discover Niches".</td></tr>
+            </tbody>
+          </table>
+        </article>
+      </section>
+
+      <section id="view-niches" class="tab-content">
+        <div class="inline-grid">
+          <p class="muted" style="margin:0; flex:1; min-width:260px; font-size:.85rem;">
+            Only keywords meeting <b>all four</b> of your Settings thresholds are shown here:
+            best sub-category BSR ≤ <span id="niche-bsr-cap">200</span> ·
+            total results ≤ <span id="niche-listings-cap">1000</span> ·
+            interest proxy ≥ <span id="niche-volume-cap">50</span> ·
+            KDP-publishable content.
+          </p>
+          <button id="niche-refresh" class="secondary outline">Refresh</button>
+        </div>
+        <div id="niche-status" class="muted" style="margin-bottom:0.75rem;"></div>
+        <article id="niche-detail" hidden></article>
+        <article>
+          <table id="niches-table">
+            <thead>
+              <tr>
+                <th>Keyword</th>
+                <th>Mkt</th>
+                <th class="sortable" data-sort-key="score">Score</th>
+                <th>Best Sub-BSR</th>
+                <th>Total Results</th>
+                <th>Interest Proxy</th>
+                <th>Content</th>
+                <th>BSR</th>
+                <th>Listings</th>
+                <th>Volume</th>
+                <th>Actions</th>
+              </tr>
+            </thead>
+            <tbody id="niches-body">
+              <tr><td colspan="11" class="muted">No qualifying niches yet. Scrape keywords or run "Find Me Niches".</td></tr>
+            </tbody>
+          </table>
+        </article>
+      </section>
+
+      <section id="view-suggestions" class="tab-content suggestions-panel">
+        <div class="inline-grid">
+          <input id="suggest-seed" type="text" placeholder="Keyword to pull Amazon + Google autocomplete for…" />
+          <button id="suggest-go" class="secondary">Fetch Suggested Keywords</button>
+          <button id="suggest-expand" class="secondary outline">Expand From All Suggestions</button>
+          <button id="suggest-clear" class="secondary outline">Clear Suggestions</button>
+        </div>
+        <div id="suggest-status" class="muted" style="margin-bottom:0.75rem;"></div>
+        <article>
+          <table id="suggest-table">
+            <thead>
+              <tr>
+                <th>Keyword</th>
+                <th>Source</th>
+                <th>Market</th>
+                <th>Score</th>
+                <th>Collected</th>
+                <th>Actions</th>
+              </tr>
+            </thead>
+            <tbody id="suggest-body">
+              <tr><td colspan="6" class="muted">No suggestions yet. Autocomplete seeds populate this list.</td></tr>
+            </tbody>
+          </table>
+        </article>
+      </section>
+
+      <section id="view-settings" class="tab-content">
+        <article>
+          <h2>Settings</h2>
+          <label for="api-key">Gemini API Key</label>
+          <input id="api-key" type="password" placeholder="Paste your Google AI (Gemini) API key" />
+          <p class="muted" style="font-size:.85rem;">
+            Get a key at
+            <a href="https://aistudio.google.com/apikey" target="_blank" rel="noreferrer">Google AI Studio</a>.
+            Without a key, expansion falls back to live Amazon + Google autocomplete.
+          </p>
+          <label for="model-select">Gemini Model</label>
+          <select id="model-select"></select>
+          <div class="grid" style="grid-template-columns: repeat(2, 1fr);">
+            <div>
+              <label for="market-default">Default Market</label>
+              <select id="market-default"></select>
+            </div>
+            <div>
+              <label for="scraped-pages">SERP Pages to Scrape</label>
+              <select id="scraped-pages">
+                <option value="1">1</option>
+                <option value="2">2</option>
+                <option value="3">3</option>
+              </select>
+            </div>
+          </div>
+          <div class="grid" style="grid-template-columns: repeat(3, 1fr);">
+            <label>
+              <input type="checkbox" id="opt-autocomplete" checked />
+              Amazon autocomplete
+            </label>
+            <label>
+              <input type="checkbox" id="opt-google" checked />
+              Google suggest
+            </label>
+            <label>
+              <input type="checkbox" id="opt-panel" checked />
+              SERP research panel
+            </label>
+          </div>
+
+          <h3 style="margin-top:1.25rem;">Niche qualification thresholds</h3>
+          <div class="grid" style="grid-template-columns: repeat(3, 1fr);">
+            <div>
+              <label for="bsr-threshold">Max best sub-category BSR</label>
+              <input id="bsr-threshold" type="number" min="1" step="10" />
+            </div>
+            <div>
+              <label for="listings-threshold">Max total results</label>
+              <input id="listings-threshold" type="number" min="1" step="50" />
+            </div>
+            <div>
+              <label for="volume-threshold">Min interest proxy</label>
+              <input id="volume-threshold" type="number" min="0" max="100" step="5" />
+            </div>
+          </div>
+
+          <div class="grid" style="grid-template-columns: repeat(3, 1fr); margin-top:.75rem;">
+            <label>
+              <input type="checkbox" id="opt-contentfilter" checked />
+              Only show KDP-publishable content
+            </label>
+            <p class="muted" style="margin:0; align-self:center; font-size:.8rem;">
+              Filters out novels, memoirs &amp; expert non-fiction (medical, scientific, legal, academic).
+            </p>
+          </div>
+
+          <h3 style="margin-top:1.25rem;">BSR enrichment (auto product-page deep-dive)</h3>
+          <div class="grid" style="grid-template-columns: repeat(3, 1fr);">
+            <label>
+              <input type="checkbox" id="opt-enrichment" checked />
+              Enrich shortlisted keywords
+            </label>
+            <div>
+              <label for="enrichment-size">Products per keyword</label>
+              <select id="enrichment-size">
+                <option value="4">4</option>
+                <option value="6">6</option>
+                <option value="8" selected>8</option>
+                <option value="10">10</option>
+                <option value="12">12</option>
+              </select>
+            </div>
+            <div>
+              <label for="enrichment-min-score">Min pre-BSR score</label>
+              <select id="enrichment-min-score">
+                <option value="40">40</option>
+                <option value="50" selected>50</option>
+                <option value="60">60</option>
+                <option value="70">70</option>
+              </select>
+            </div>
+          </div>
+
+          <h3 style="margin-top:1.25rem;">Discovery Mode (seedless)</h3>
+          <div class="grid" style="grid-template-columns: repeat(3, 1fr);">
+            <label>
+              <input type="checkbox" id="opt-discovery" />
+              Scheduled discovery (daily alert)
+            </label>
+            <div>
+              <label for="discovery-categories">Categories per run</label>
+              <select id="discovery-categories">
+                <option value="4">4</option>
+                <option value="8" selected>8</option>
+                <option value="12">12</option>
+                <option value="16">16</option>
+                <option value="20">20</option>
+              </select>
+            </div>
+            <div>
+              <label for="discovery-max-keywords">Keywords per run</label>
+              <select id="discovery-max-keywords">
+                <option value="6">6</option>
+                <option value="12" selected>12</option>
+                <option value="20">20</option>
+              </select>
+            </div>
+          </div>
+
+          <button id="save-settings-btn">Save Settings</button>
+          <div id="settings-status" class="muted"></div>
+        </article>
+      </section>
+    </main>
+
+    <div id="legal-modal" class="legal-modal-backdrop" hidden>
+      <div class="legal-modal" role="dialog" aria-modal="true">
+        <h2>Trademark &amp; Copyright Screen</h2>
+        <div id="legal-content"></div>
+      </div>
+    </div>
+
+    <script type="module" src="app.js"></script>
+  </body>
+</html>

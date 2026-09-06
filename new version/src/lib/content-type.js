@@ -1,0 +1,445 @@
+/**
+ * KDP-Publishable Content-Type classifier (Phase 1.5 / Gap E).
+ *
+ * Decides whether a keyword's niche is something an indie KDP publisher can
+ * realistically produce — low-content (journals, planners, logbooks, notebooks,
+ * calendars, trackers), medium-content (coloring / activity / puzzle /
+ * guided-workbook), personalized/name-variant, and researched-and-compiled
+ * guides — versus high-content work that requires being a novelist, memoirist,
+ * or subject-matter expert (medical, biological, scientific, technical, legal,
+ * academic non-fiction).
+ *
+ * Signals (in descending strength):
+ *   1. keyword text  — strongest; a "journal"/"coloring book" keyword wins even
+ *      if some competitor titles look like fiction.
+ *   2. sample titles  — majority verdict across the top scraped cards.
+ *   3. category breadcrumbs (from BSR enrichment) — a novel or a clinical text
+ *      usually lives under Literature/Fiction or Medical categories.
+ *   4. Kindle-format availability — blank-interior books rarely get Kindle
+ *      editions, so a low Kindle share is a low/medium-content tell.
+ *
+ * Pure module: no chrome APIs, safe to unit-test.
+ */
+
+const LOW_KIND = {
+  low: 'low-content',
+  medium: 'medium-content',
+  guide: 'guide',
+  personalized: 'personalized'
+};
+
+/**
+ * KDP-friendly content signals, each ~ a kind ('low' | 'medium' | 'guide').
+ * Longest/most specific phrases should come before short generic ones when
+ * they share words (first match wins for the label).
+ */
+export const LOW_MEDIUM_SIGNALS = [
+  // --- Distinctively low-content ---
+  { phrase: 'guest book', label: 'Guest Book', kind: 'low' },
+  { phrase: 'record book', label: 'Record Book', kind: 'low' },
+  { phrase: 'memory book', label: 'Memory Book', kind: 'low' },
+  { phrase: 'keepsake', label: 'Keepsake Book', kind: 'low' },
+  { phrase: 'ledger', label: 'Ledger', kind: 'low' },
+  { phrase: 'log book', label: 'Logbook', kind: 'low' },
+  { phrase: 'logbook', label: 'Logbook', kind: 'low' },
+  { phrase: 'flight log', label: 'Logbook', kind: 'low' },
+  { phrase: 'reading log', label: 'Logbook', kind: 'low' },
+  { phrase: 'workout log', label: 'Logbook', kind: 'low' },
+  { phrase: 'symptom log', label: 'Logbook', kind: 'low' },
+  { phrase: 'tracking log', label: 'Logbook', kind: 'low' },
+  { phrase: 'food log', label: 'Logbook', kind: 'low' },
+  { phrase: 'cord wood log', label: 'Logbook', kind: 'low' },
+  { phrase: 'daily log', label: 'Logbook', kind: 'low' },
+  { phrase: 'journal', label: 'Journal', kind: 'low' },
+  { phrase: 'diary', label: 'Diary', kind: 'low' },
+  { phrase: 'notebook', label: 'Notebook', kind: 'low' },
+  { phrase: 'planner', label: 'Planner', kind: 'low' },
+  { phrase: 'meal planner', label: 'Meal Planner', kind: 'low' },
+  { phrase: 'budget planner', label: 'Budget Planner', kind: 'low' },
+  { phrase: 'weekly planner', label: 'Planner', kind: 'low' },
+  { phrase: 'calendar', label: 'Calendar', kind: 'low' },
+  { phrase: 'tracker', label: 'Tracker', kind: 'low' },
+  { phrase: 'habit tracker', label: 'Tracker', kind: 'low' },
+  { phrase: 'mood tracker', label: 'Tracker', kind: 'low' },
+  { phrase: 'period tracker', label: 'Tracker', kind: 'low' },
+  { phrase: 'water tracker', label: 'Tracker', kind: 'low' },
+  { phrase: 'gratitude', label: 'Gratitude Journal', kind: 'low' },
+  { phrase: 'manifestation', label: 'Manifestation Journal', kind: 'low' },
+  { phrase: 'prompts', label: 'Prompt Journal', kind: 'low' },
+  { phrase: 'prompt book', label: 'Prompt Journal', kind: 'low' },
+  { phrase: 'sketchbook', label: 'Sketchbook', kind: 'low' },
+  { phrase: 'sketch book', label: 'Sketchbook', kind: 'low' },
+  { phrase: 'dot grid', label: 'Notebook', kind: 'low' },
+  { phrase: 'bullet journal', label: 'Bullet Journal', kind: 'low' },
+  { phrase: 'vision board', label: 'Vision Board Book', kind: 'low' },
+  { phrase: 'book of shadows', label: 'Journal', kind: 'low' },
+
+  // --- Medium-content: activity / coloring / puzzle / workbook ---
+  { phrase: 'coloring book', label: 'Coloring Book', kind: 'medium' },
+  { phrase: 'colour book', label: 'Coloring Book', kind: 'medium' },
+  { phrase: 'coloring pages', label: 'Coloring Book', kind: 'medium' },
+  { phrase: 'colouring', label: 'Coloring Book', kind: 'medium' },
+  { phrase: 'coloring', label: 'Coloring Book', kind: 'medium' },
+  { phrase: 'activity book', label: 'Activity Book', kind: 'medium' },
+  { phrase: 'activities for', label: 'Activity Book', kind: 'medium' },
+  { phrase: 'dot to dot', label: 'Activity Book', kind: 'medium' },
+  { phrase: 'connect the dots', label: 'Activity Book', kind: 'medium' },
+  { phrase: 'puzzle book', label: 'Puzzle Book', kind: 'medium' },
+  { phrase: 'puzzles', label: 'Puzzle Book', kind: 'medium' },
+  { phrase: 'puzzle', label: 'Puzzle Book', kind: 'medium' },
+  { phrase: 'crossword', label: 'Crossword Book', kind: 'medium' },
+  { phrase: 'word search', label: 'Word Search', kind: 'medium' },
+  { phrase: 'word find', label: 'Word Search', kind: 'medium' },
+  { phrase: 'sudoku', label: 'Sudoku Book', kind: 'medium' },
+  { phrase: 'mazes', label: 'Maze Book', kind: 'medium' },
+  { phrase: 'maze book', label: 'Maze Book', kind: 'medium' },
+  { phrase: 'workbook', label: 'Workbook', kind: 'medium' },
+  { phrase: 'flash cards', label: 'Flash Card Book', kind: 'medium' },
+  { phrase: 'flashcards', label: 'Flash Card Book', kind: 'medium' },
+  { phrase: 'handwriting practice', label: 'Practice Book', kind: 'medium' },
+  { phrase: 'trace letters', label: 'Practice Book', kind: 'medium' },
+  { phrase: 'cursive', label: 'Practice Book', kind: 'medium' },
+  { phrase: 'kindergarten', label: 'Educational Activity', kind: 'medium' },
+  { phrase: 'preschool', label: 'Educational Activity', kind: 'medium' },
+  { phrase: 'for toddlers', label: "Children's Activity", kind: 'medium' },
+  { phrase: 'for kids', label: "Children's Activity", kind: 'medium' },
+  { phrase: 'for children', label: "Children's Activity", kind: 'medium' },
+
+  // --- Guides & compiled non-fiction ---
+  { phrase: 'study guide', label: 'Study Guide', kind: 'guide' },
+  { phrase: 'complete guide', label: 'Guide', kind: 'guide' },
+  { phrase: 'guide for', label: 'Guide', kind: 'guide' },
+  { phrase: 'guide book', label: 'Guide', kind: 'guide' },
+  { phrase: 'guide', label: 'Guide', kind: 'guide' },
+  { phrase: 'cookbook', label: 'Cookbook', kind: 'guide' },
+  { phrase: 'cook book', label: 'Cookbook', kind: 'guide' },
+  { phrase: 'recipes', label: 'Cookbook', kind: 'guide' },
+  { phrase: 'recipe book', label: 'Cookbook', kind: 'guide' },
+  { phrase: 'meal prep', label: 'Cookbook', kind: 'guide' },
+  { phrase: 'air fryer', label: 'Cookbook', kind: 'guide' },
+  { phrase: 'instant pot', label: 'Cookbook', kind: 'guide' },
+  { phrase: 'manual', label: 'Manual', kind: 'guide' },
+  { phrase: 'handbook', label: 'Handbook', kind: 'guide' },
+  { phrase: 'checklist', label: 'Checklist Book', kind: 'guide' },
+  { phrase: 'templates', label: 'Template Book', kind: 'guide' },
+  { phrase: 'declutter', label: 'Guide', kind: 'guide' },
+  { phrase: 'decluttering', label: 'Guide', kind: 'guide' },
+  { phrase: 'meal plan', label: 'Meal Plan Book', kind: 'guide' },
+  { phrase: 'for beginners', label: 'Beginner Guide', kind: 'guide' },
+  { phrase: 'how to', label: 'How-To Guide', kind: 'guide' },
+  { phrase: '101', label: 'Collection', kind: 'guide' },
+  { phrase: 'curriculum', label: 'Curriculum', kind: 'guide' }
+];
+
+export const PERSONALIZED_SIGNALS = [
+  { phrase: 'personalized', label: 'Personalized' },
+  { phrase: 'personalised', label: 'Personalized' },
+  { phrase: 'custom name', label: 'Personalized' },
+  { phrase: 'name book', label: 'Personalized' },
+  { phrase: 'for a girl named', label: 'Personalized' },
+  { phrase: 'for a boy named', label: 'Personalized' },
+  { phrase: 'name search', label: 'Personalized' },
+  { phrase: 'my daughter', label: 'Personalized' },
+  { phrase: 'my son', label: 'Personalized' },
+  { phrase: 'my granddaughter', label: 'Personalized' },
+  { phrase: 'my grandson', label: 'Personalized' },
+  { phrase: 'my niece', label: 'Personalized' },
+  { phrase: 'my nephew', label: 'Personalized' },
+  { phrase: 'my boyfriend', label: 'Personalized' },
+  { phrase: 'my girlfriend', label: 'Personalized' },
+  { phrase: 'my husband', label: 'Personalized' },
+  { phrase: 'my wife', label: 'Personalized' },
+  { phrase: 'my mom', label: 'Personalized' },
+  { phrase: 'my dad', label: 'Personalized' },
+  { phrase: 'gift for', label: 'Gift Book' },
+  { phrase: 'letters to my', label: 'Personalized' }
+];
+
+/**
+ * High-content signals: fiction/memoir AND expertise-required non-fiction.
+ * expertise = true means the niche requires a professional credential (this
+ * flips metrics.requiresExpertise).
+ */
+export const HIGH_CONTENT_SIGNALS = [
+  // Fiction / narrative writing (excluded, not "expertise")
+  { phrase: 'a novel', expertise: false },
+  { phrase: 'novel', expertise: false },
+  { phrase: 'novels', expertise: false },
+  { phrase: 'fiction', expertise: false },
+  { phrase: 'novelist', expertise: false },
+  { phrase: 'short stories', expertise: false },
+  { phrase: 'anthology', expertise: false },
+  { phrase: 'memoir', expertise: false },
+  { phrase: 'memoirs', expertise: false },
+  { phrase: 'autobiography', expertise: false },
+  { phrase: 'biography', expertise: false },
+  { phrase: 'biographies', expertise: false },
+  { phrase: 'essays', expertise: false },
+  { phrase: 'essay collection', expertise: false },
+  { phrase: 'poetry', expertise: false },
+  { phrase: 'poem', expertise: false },
+  { phrase: 'poems', expertise: false },
+  { phrase: 'literary', expertise: false },
+  { phrase: 'literature', expertise: false },
+  { phrase: 'romance novel', expertise: false },
+  { phrase: 'mystery novel', expertise: false },
+  { phrase: 'drama', expertise: false },
+
+  // Clinical / medical / scientific text (expertise required)
+  { phrase: 'clinical', expertise: true },
+  { phrase: 'diagnos*', expertise: true },
+  { phrase: 'patholog*', expertise: true },
+  { phrase: 'pathophysiology', expertise: true },
+  { phrase: 'pharmacolog*', expertise: true },
+  { phrase: 'pharmaceutical', expertise: true },
+  { phrase: 'psychopharmacol*', expertise: true },
+  { phrase: 'oncolog*', expertise: true },
+  { phrase: 'cardiolog*', expertise: true },
+  { phrase: 'neurolog*', expertise: true },
+  { phrase: 'nephrolog*', expertise: true },
+  { phrase: 'endocrinol*', expertise: true },
+  { phrase: 'immunolog*', expertise: true },
+  { phrase: 'dermatolog*', expertise: true },
+  { phrase: 'obstetric*', expertise: true },
+  { phrase: 'gynecolog*', expertise: true },
+  { phrase: 'psychiatr*', expertise: true },
+  { phrase: 'medical', expertise: true },
+  { phrase: 'medicine', expertise: true },
+  { phrase: 'physiolog*', expertise: true },
+  { phrase: 'anatom*', expertise: true },
+  { phrase: 'surger*', expertise: true },
+  { phrase: 'biolog*', expertise: true },
+  { phrase: 'physics', expertise: true },
+  { phrase: 'chemistry', expertise: true },
+  { phrase: 'mathematics', expertise: true },
+  { phrase: 'anthropolog*', expertise: true },
+  { phrase: 'genetics', expertise: true },
+  { phrase: 'textbook', expertise: false },
+  { phrase: 'text book', expertise: false },
+  { phrase: 'dissertation', expertise: true },
+  { phrase: 'thesis', expertise: true },
+  { phrase: 'mcat', expertise: true },
+  { phrase: 'usmle', expertise: true },
+  { phrase: 'bar exam', expertise: true },
+  { phrase: 'lsat', expertise: true },
+  { phrase: 'naplex', expertise: true },
+  { phrase: 'jurisprudence', expertise: true },
+  { phrase: 'statute', expertise: true },
+  { phrase: 'constitutional law', expertise: true },
+  { phrase: 'forensic science', expertise: true },
+
+  // Credential markers in titles
+  { phrase: 'by dr', expertise: true },
+  { phrase: 'by md', expertise: true },
+  { phrase: 'm d', expertise: true },
+  { phrase: 'ph d', expertise: true }
+];
+
+/**
+ * Category breadcrumb deny patterns (checked after BSR enrichment). Matching
+ * text is case-insensitive; substrings are intentional.
+ */
+export const DENY_CATEGORY_PATTERNS = [
+  /fiction/i,
+  /literature/i,
+  /novel/i,
+  /mystery/i,
+  /thriller/i,
+  /horror/i,
+  /fantasy/i,
+  /romance/i,
+  /poetry/i,
+  /drama/i,
+  /comic/i,
+  /memoir/i,
+  /biograph/i,
+  /autobiograph/i,
+  /textbook/i,
+  /test prep/i,
+  /exam prep/i,
+  /medical/i,
+  /clinical/i,
+  /pharmaco/i,
+  /patholog/i,
+  /diagnos/i,
+  /oncology/i,
+  /cardiology/i,
+  /neurolog/i,
+  /psychiatr/i,
+  /law\b/i,
+  /legal/i,
+  /engineering/i,
+  /computer science/i,
+  /physics/i,
+  /chemistry/i,
+  /biology/i,
+  /mathematics/i,
+  /political science/i,
+  /philosophy/i,
+  /history/i
+];
+
+export const ALLOW_CATEGORY_PATTERNS = [
+  /journal/i,
+  /planner/i,
+  /notebook/i,
+  /log/i,
+  /diary/i,
+  /calendar/i,
+  /coloring/i,
+  /colouring/i,
+  /activity/i,
+  /puzzle/i,
+  /cooking/i,
+  /recipe/i,
+  /health.?fitness/i,
+  /diet/i,
+  /self.?help/i,
+  /children/i,
+  /crafts/i,
+  /hobbies/i,
+  /travel/i,
+  /religion/i,
+  /devotional/i,
+  /study guide/i,
+  /education/i,
+  /reference/i
+];
+
+function esc(s) {
+  return s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+}
+
+/**
+ * Word-anchored phrase match. A trailing '*' on the final token turns it into
+ * a prefix match (e.g. 'diagnos*' matches "diagnosis", "diagnostic", …).
+ */
+function hasPhrase(text, phrase) {
+  const tokens = String(phrase).split(/\s+/).filter(Boolean);
+  if (!tokens.length) return false;
+  const parts = tokens.map((tok, i) => {
+    const prefix = i === tokens.length - 1 && tok.endsWith('*');
+    const body = esc(prefix ? tok.slice(0, -1) : tok);
+    return i === 0 ? `\\b${body}` : `\\s+${body}` + (prefix ? '[\\w]*\\b' : '\\b');
+  });
+  return new RegExp(parts.join(''), 'i').test(text);
+}
+
+function normalize(text) {
+  return String(text || '').toLowerCase().replace(/[^a-z0-9]+/g, ' ').trim();
+}
+
+/** Count how many distinct inputs matched at least one of phrases. */
+function countMatches(inputs, signals, matchFn) {
+  let matched = 0;
+  (inputs || []).forEach((input) => {
+    if (signals.some((s) => hasPhrase(matchFn(input), s.phrase))) matched++;
+  });
+  return matched;
+}
+
+function dominantLowSignal(text) {
+  for (const s of LOW_MEDIUM_SIGNALS) {
+    if (hasPhrase(text, s.phrase)) return s;
+  }
+  return null;
+}
+
+function pick(a, b) {
+  return a == null || a === '' ? b : a;
+}
+
+function result(contentType, label, source, confidence, requiresExpertise = false) {
+  return { contentType, contentTypeLabel: label, contentTypeSource: source, confidence, requiresExpertise };
+}
+
+/**
+ * Classify a niche's content production type.
+ * @param {object} input
+ * @param {string} input.keyword  - the niche keyword (strongest signal)
+ * @param {string[]} input.titles - sampled competitor titles (weak signal)
+ * @param {string[]} input.categories - category breadcrumb names (post-enrichment)
+ * @param {number|null} input.kindleShare - 0-1 share of sample with Kindle edition
+ * @param {number} input.sampleSize - scraped cards in the sample
+ * @returns {{contentType:string, contentTypeLabel:string, contentTypeSource:string,
+ *            confidence:string, requiresExpertise:boolean}}
+ */
+export function classifyContentType({
+  keyword = '',
+  titles = [],
+  categories = [],
+  kindleShare = null,
+  sampleSize = 0
+} = {}) {
+  const kw = normalize(keyword);
+  const nTitles = (titles || []).length;
+
+  // 1. Keyword-level personalized / low / medium / guide markers — strongest.
+  if (hasPhrase(kw, 'personalized') || hasPhrase(kw, 'personalised') || hasPhrase(kw, 'gift for')) {
+    return result('personalized', 'Personalized', 'title-regex', 'high');
+  }
+  const kwLow = LOW_MEDIUM_SIGNALS.filter((s) => hasPhrase(kw, s.phrase));
+  const kwHigh = HIGH_CONTENT_SIGNALS.filter((s) => hasPhrase(kw, s.phrase));
+
+  // 2. Keyword-level high-content markers — exclude unless a STRONG
+  //    low/medium content signal genuinely coexists ("clinical trial logbook"
+  //    is a real logbook; "clinical handbook of diabetes" is a real textbook).
+  //    Strong = journal/planner/activity/workbook etc.; weak = guide-type.
+  if (kwHigh.length) {
+    const anyExpert = kwHigh.some((s) => s.expertise);
+    const strongLow = kwLow.some((s) => s.kind !== 'guide');
+    if (!strongLow) {
+      return result(
+        'high-content-excluded',
+        anyExpert ? 'Expertise-required non-fiction' : 'High-content (fiction / narrative)',
+        'title-regex',
+        'high',
+        anyExpert
+      );
+    }
+  }
+
+  if (kwLow.length) {
+    const sig = dominantLowSignal(kw);
+    return result(LOW_KIND[sig.kind] || 'guide', sig.label, 'title-regex', 'high');
+  }
+
+  // 3. Majority verdict across the sampled SERP titles (>=3 sampled cards).
+  if (nTitles >= 3) {
+    const highMatches = countMatches(titles, HIGH_CONTENT_SIGNALS, (t) => t);
+    const lowMatches = countMatches(titles, LOW_MEDIUM_SIGNALS, (t) => t);
+    if (highMatches >= Math.max(3, Math.ceil(nTitles * 0.6)) && lowMatches < highMatches * 0.5) {
+      return result('high-content-excluded', 'High-content titles dominate', 'title-regex', 'medium');
+    }
+    if (lowMatches >= Math.max(3, Math.ceil(nTitles * 0.3))) {
+      const sig = dominantLowSignal((titles || []).join(' '));
+      return result(LOW_KIND[sig.kind] || 'guide', sig.label, 'title-regex', 'medium');
+    }
+  }
+
+  // 4. Category breadcrumbs (post-BSR-enrichment).
+  const catText = (categories || []).join(' ');
+  if (catText) {
+    if (DENY_CATEGORY_PATTERNS.some((re) => re.test(catText))) {
+      const expert = /medical|clinical|pharmaco|patholog|diagnos|oncology|cardiology|neurolog|psychiatr|law\b|legal|engineering|physics|chemistry|biology|mathematics|political science/i.test(catText);
+      return result(
+        'high-content-excluded',
+        expert ? 'Lives under an expertise-required category' : 'Lives under a high-content category',
+        'category-breadcrumb',
+        'medium',
+        expert
+      );
+    }
+    if (ALLOW_CATEGORY_PATTERNS.some((re) => re.test(catText))) {
+      return result('guide', 'Category-confirmed', 'category-breadcrumb', 'medium');
+    }
+  }
+
+  // 5. Kindle-format availability: blank-interior books rarely ship a Kindle
+  // edition, so a low share across a decent sample is a low/medium tell.
+  if (kindleShare != null && sampleSize >= 4 && kindleShare < 0.15) {
+    return result('low-content', 'No Kindle titles (interior / activity style)', 'format-signal', 'low');
+  }
+
+  return result('unknown', 'Unknown', 'title-regex', 'low', false);
+}
