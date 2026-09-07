@@ -545,7 +545,6 @@ async function mergeProductIntoParent(parentKeyword, payload) {
   const settings = await getSettings();
   const parent = await getKeyword(parentKeyword);
   if (!parent) return { merged: false, reason: 'parent-missing' };
-  const settings = await getSettings();
   const thresholds = settingsToThresholds(settings);
 
   parent.metrics = parent.metrics || {};
