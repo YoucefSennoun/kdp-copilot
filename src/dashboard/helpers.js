@@ -91,6 +91,24 @@ export function showStatus(el, text, isError) {
   el.style.color = isError ? '#e53935' : '';
 }
 
+/**
+ * Busy indicator for long AI calls (trademark, analysis, listing): shows the
+ * base text immediately, then appends an elapsed-seconds counter so users can
+ * tell work is in progress instead of stuck. Returns a stop() function.
+ */
+export function startBusyStatus(el, baseText) {
+  const t0 = Date.now();
+  const tick = () => {
+    const s = Math.round((Date.now() - t0) / 1000);
+    el.textContent = s < 4 ? baseText : `${baseText} (${s}s elapsed…)`;
+    el.classList.toggle('muted', true);
+    el.style.color = '';
+  };
+  tick();
+  const timer = setInterval(tick, 1000);
+  return () => clearInterval(timer);
+}
+
 export function escapeHtml(str) {
   return String(str ?? '')
     .replace(/&/g, '&amp;')

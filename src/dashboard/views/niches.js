@@ -1,4 +1,4 @@
-import { send, fmt, escapeHtml } from '../helpers.js';
+import { send, fmt, escapeHtml, showStatus, startBusyStatus } from '../helpers.js';
 import { settings } from '../app.js';
 import { openDetailDrawer } from './detail.js';
 import { classifyContentType, scopeAllows } from '../../lib/content-type.js';
@@ -153,8 +153,20 @@ function renderNicheTable() {
         await send('SCRAPE_KEYWORD', { keyword, market });
         $('niche-status').textContent = `Queued scrape for "${keyword}".`;
       } else if (a.dataset.act === 'legal') {
-        await send('CHECK_TRADEMARK', { keyword, market });
-        openDetailDrawer(keyword, { market, legalRequested: true });
+        a.style.pointerEvents = 'none';
+        a.style.opacity = '0.4';
+        const stop = startBusyStatus($('niche-status'), `Checking trademark for "${keyword}" — the AI review can take up to a minute`);
+        try {
+          await send('CHECK_TRADEMARK', { keyword, market });
+          showStatus($('niche-status'), `Trademark report ready for "${keyword}" — see the detail drawer.`);
+          openDetailDrawer(keyword, { market, legalRequested: true });
+        } catch (err) {
+          showStatus($('niche-status'), `Trademark check failed: ${err.message}`, true);
+        } finally {
+          stop();
+          a.style.pointerEvents = '';
+          a.style.opacity = '';
+        }
       } else {
         openDetailDrawer(keyword, { market });
       }

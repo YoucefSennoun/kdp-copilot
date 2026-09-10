@@ -1,4 +1,4 @@
-import { send, fmt, toneClass, escapeHtml, showStatus, totalResultsLabel, bsrLabel, contentChip } from '../helpers.js';
+import { send, fmt, toneClass, escapeHtml, showStatus, startBusyStatus, totalResultsLabel, bsrLabel, contentChip } from '../helpers.js';
 import { settings, invalidateSettings } from '../app.js';
 import { openDetailDrawer } from './detail.js';
 import { getMarkets } from './markets.js';
@@ -251,10 +251,17 @@ async function handleRowAction(keyword, act) {
         openDetailDrawer(keyword, { market, analysis: r });
         break;
       }
-      case 'legal':
-        await send('CHECK_TRADEMARK', { keyword, market });
-        openDetailDrawer(keyword, { market, legalRequested: true });
+      case 'legal': {
+        const stop = startBusyStatus($('status'), `Checking trademark for "${keyword}" across markets — the AI review can take up to a minute`);
+        try {
+          await send('CHECK_TRADEMARK', { keyword, market });
+          openDetailDrawer(keyword, { market, legalRequested: true });
+          showStatus($('status'), `Trademark report ready for "${keyword}" — click View trademark report.`);
+        } finally {
+          stop();
+        }
         break;
+      }
       case 'scrape':
         await send('SCRAPE_KEYWORD', { keyword, market });
         showStatus($('status'), `Queued scrape for "${keyword}".`);

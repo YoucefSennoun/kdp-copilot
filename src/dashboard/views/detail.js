@@ -342,10 +342,13 @@ function renderLegal(r, market) {
     const btn = document.getElementById('legal-rerun');
     btn.disabled = true;
     btn.textContent = 'Checking…';
+    legalContent.insertAdjacentHTML('afterbegin',
+      '<p class="legal-note" id="legal-wait">Asking the AI to review every market — this can take up to a minute…</p>');
     try {
       const res = await send('CHECK_TRADEMARK', { keyword: r.keyword, market: market || r.market });
       renderLegal(res, market || r.market);
     } catch (err) {
+      document.getElementById('legal-wait')?.remove();
       legalContent.insertAdjacentHTML('beforeend',
         `<p class="legal-note" style="color:#e53935;">Re-check failed: ${escapeHtml(err.message)}</p>`);
       btn.disabled = false;
