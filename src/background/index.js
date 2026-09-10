@@ -52,6 +52,7 @@ import {
   checkTrademark,
   localTrademarkSweep,
   localExpandSuggestions,
+  computeSuggestionRelevance,
   getApiKey,
   fetchModelChoices
 } from './ai.js';
@@ -1202,10 +1203,37 @@ function computeSuggestionQualifies(scored, thresholds, keyword, allowFiction = 
 async function fetchSuggestions({ seed, market }) {
   if (!seed || !seed.trim()) return { amazon: [], google: [] };
   const settings = await getSettings();
+  const marketCode = getMarket(market || settings.market).code;
+  const cleanSeed = seed.trim().toLowerCase();
   const amazon = settings.autocompleteEnabled !== false
-    ? await amazonAutocomplete(seed, market) : [];
+    ? await amazonAutocomplete(seed, marketCode) : [];
   const google = settings.googleSuggestEnabled !== false
-    ? await googleSuggest(seed, market) : [];
+    ? await googleSuggest(seed, marketCode) : [];
+
+  // Persist so the Suggestions tab (GET_SUGGESTIONS) and EXPAND_FROM_SUGGESTIONS
+  // actually see them — previously this fetched but never stored, leaving the
+  // tab permanently at "0 suggestion(s) stored."
+  const allowFiction = settings.allowNicheFiction === true;
+  const scope = settings.contentScope || 'rule8';
+  const seen = new Set();
+  const rows = [];
+  const pushRow = (term, source) => {
+    const keyword = String(term || '').trim().toLowerCase();
+    if (!keyword || keyword === cleanSeed || seen.has(keyword)) return;
+    seen.add(keyword);
+    rows.push({
+      id: `${source}:${keyword}:${marketCode}`,
+      keyword,
+      source,
+      market: marketCode,
+      expandedFrom: seed.trim(),
+      score: computeSuggestionRelevance(keyword, seed, allowFiction, scope)
+    });
+  };
+  amazon.forEach((t) => pushRow(t, 'amazon-autocomplete'));
+  google.forEach((t) => pushRow(t, 'google-suggest'));
+  if (rows.length) await putSuggestions(rows);
+
   return { amazon, google };
 }
 
