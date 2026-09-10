@@ -28,7 +28,7 @@ const MODEL_LIST_URL = 'https://generativelanguage.googleapis.com/v1beta/models'
 // ---------------------------------------------------------------------------
 
 export const DEFAULT_CUSTOM_BASE_URL = 'https://openrouter.ai/api/v1';
-export const DEFAULT_CUSTOM_MODEL = 'xiaomi/mimo-v2-flash:free';
+export const DEFAULT_CUSTOM_MODEL = 'xiaomi/mimo-v2.5';
 
 export const CUSTOM_BASE_URLS = [
   { id: 'https://opencode.ai/zen/v1', label: 'OpenCode Zen (free: Big Pickle, MiMo-V2.5, Muse Spark 1.3 Contributor)' },
@@ -42,7 +42,7 @@ export const CUSTOM_BASE_URLS = [
 // external API calls are rejected ("free tier can only be used in OpenCode").
 // For external use pick OpenRouter :free models or a paid Zen model.
 export const CUSTOM_MODEL_CHOICES = [
-  { id: 'xiaomi/mimo-v2-flash:free', label: 'MiMo-V2-Flash (OpenRouter, FREE)', api: 'chat' },
+  { id: 'xiaomi/mimo-v2.5', label: 'MiMo-V2.5 (OpenRouter, cheap — Flash free tier was retired)', api: 'chat' },
   { id: 'meta/muse-spark-1.3-contributor', label: 'Muse Spark 1.3 Contributor (OpenRouter, ~$0.10/$0.20 per 1M)', api: 'chat' },
   { id: 'big-pickle', label: 'Big Pickle (Zen paid credit; free tier is OpenCode-app-only)', api: 'chat' },
   { id: 'mimo-v2.5-free', label: 'MiMo-V2.5 Free (Zen paid credit; free tier is OpenCode-app-only)', api: 'chat' },
@@ -155,7 +155,10 @@ async function postJson(url, apiKey, body, label) {
       detail = await res.text();
     }
     if (/only be used in OpenCode/i.test(detail)) {
-      detail += ' — Zen free models only work inside the OpenCode app. For external use, switch Base URL to OpenRouter with a free :free model (e.g. xiaomi/mimo-v2-flash:free).';
+      detail += ' — Zen free models only work inside the OpenCode app. For external use, use OpenRouter (see the Settings preset list).';
+    }
+    if (/deprecat/i.test(detail)) {
+      detail += ' — this model id was retired by the provider. Pick the replacement from the Settings preset list.';
     }
     throw new Error(`${label} API error ${res.status}: ${detail}`);
   }

@@ -35,7 +35,7 @@ function fillForm(s) {
   $('ai-provider').value = s.aiProvider === 'custom' ? 'custom' : 'gemini';
   $('custom-base-url').value = s.customBaseUrl || 'https://openrouter.ai/api/v1';
   $('custom-api-key').value = s.customApiKey || '';
-  $('custom-model').value = s.customModel || 'xiaomi/mimo-v2-flash:free';
+  $('custom-model').value = s.customModel || 'xiaomi/mimo-v2.5';
   toggleProviderBlock();
   $('market-default').innerHTML = marketOptions();
   $('market-default').value = s.market || 'us';
@@ -90,7 +90,7 @@ async function handleSave() {
     aiProvider: $('ai-provider').value === 'custom' ? 'custom' : 'gemini',
     customBaseUrl: $('custom-base-url').value.trim() || 'https://openrouter.ai/api/v1',
     customApiKey: $('custom-api-key').value.trim() || null,
-    customModel: $('custom-model').value.trim() || 'xiaomi/mimo-v2-flash:free',
+    customModel: $('custom-model').value.trim() || 'xiaomi/mimo-v2.5',
     market: $('market-default').value || 'us',
     scrapedPages: parseInt($('scraped-pages').value, 10) || 1,
     autocompleteEnabled: $('opt-autocomplete').checked,

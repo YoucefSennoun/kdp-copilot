@@ -294,7 +294,7 @@ export const DEFAULT_SETTINGS = {
   aiProvider: 'gemini', // 'gemini' | 'custom' (OpenRouter / OpenCode Zen / …)
   customBaseUrl: 'https://openrouter.ai/api/v1',
   customApiKey: '',
-  customModel: 'xiaomi/mimo-v2-flash:free',
+  customModel: 'xiaomi/mimo-v2.5',
   market: 'us',
   autocompleteEnabled: true,
   googleSuggestEnabled: true,
