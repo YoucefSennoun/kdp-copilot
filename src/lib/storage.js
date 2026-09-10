@@ -291,6 +291,10 @@ export async function clearDiscoveryRuns() {
 export const DEFAULT_SETTINGS = {
   apiKey: '',
   model: 'gemini-3.6-flash',
+  aiProvider: 'gemini', // 'gemini' | 'custom' (OpenCode Zen / OpenRouter / …)
+  customBaseUrl: 'https://opencode.ai/zen/v1',
+  customApiKey: '',
+  customModel: 'big-pickle',
   market: 'us',
   autocompleteEnabled: true,
   googleSuggestEnabled: true,
@@ -352,6 +356,12 @@ export async function getSettings() {
       if (!['kindle', 'paperback', 'hardcover'].includes(merged.formatFilter)) {
         merged.formatFilter = null;
       }
+      // Normalize AI provider selection.
+      if (!['gemini', 'custom'].includes(merged.aiProvider)) {
+        merged.aiProvider = 'gemini';
+      }
+      if (!merged.customBaseUrl) merged.customBaseUrl = DEFAULT_SETTINGS.customBaseUrl;
+      if (!merged.customModel) merged.customModel = DEFAULT_SETTINGS.customModel;
       resolve(merged);
     });
   });

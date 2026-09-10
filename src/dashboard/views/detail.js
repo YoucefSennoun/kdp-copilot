@@ -130,10 +130,10 @@ function renderDetail(k, opts) {
 
   const analysisHtml =
     k.analysis && k.analysis.report
-      ? `<h3>Gemini Niche Analysis</h3>
+      ? `<h3>AI Niche Analysis</h3>
          <div class="ai-output">${escapeHtml(k.analysis.report)}</div>`
       : opts.analysis && opts.analysis.report
-        ? `<h3>Gemini Niche Analysis</h3>
+        ? `<h3>AI Niche Analysis</h3>
            <div class="ai-output">${escapeHtml(opts.analysis.report)}</div>`
         : '';
 
@@ -332,7 +332,7 @@ function renderLegal(r, market) {
     ${safeKeyword}
     ${(r.notes || []).map((n) => `<p class="legal-note">• ${escapeHtml(n)}</p>`).join('')}
     <p class="legal-note">© Copyright: ${escapeHtml(COPYRIGHT_NOTE)}</p>
-    <div class="legal-note">Source: ${r.ai ? 'Gemini AI review + local screen' : 'local multi-market phrase screen'}${r.checkedAt ? ` · ${fmt.datetime(r.checkedAt)}` : ''}.</div>
+    <div class="legal-note">Source: ${r.ai ? 'AI review + local screen' : 'local multi-market phrase screen'}${r.checkedAt ? ` · ${fmt.datetime(r.checkedAt)}` : ''}.</div>
     <div style="display:flex; gap:.5rem; margin-top:.75rem;">
       <button id="legal-rerun" class="secondary outline">Re-check</button>
       <button id="legal-close" class="contrast outline">Close</button>

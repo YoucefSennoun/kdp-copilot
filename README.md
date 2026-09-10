@@ -1,4 +1,4 @@
-# KDP Copilot — v0.8.5
+# KDP Copilot — v0.8.6
 
 A Chrome extension (Manifest V3) that turns Amazon KDP keyword research into a **scored, rules-driven workflow**.
 It injects a Productor-style research panel into Amazon search results, qualifies niches with a
@@ -10,7 +10,7 @@ without an API key via live Amazon + Google autocomplete.
 
 ---
 
-## What v0.8.5 checks (rules-v1)
+## What v0.8.6 checks (rules-v1)
 
 Every researched keyword is judged against 8 gates (`qualifies.all` must be true).
 All thresholds are configurable in **Settings**:
@@ -55,7 +55,13 @@ All thresholds are configurable in **Settings**:
 - **BSR enrichment**: visits the top-N product pages per shortlisted keyword (default top 8,
   score ≥ 50, skipped when results > 3000) for real overall/sub-category BSR, categories,
   and locale-aware publication dates (EN/DE/FR/IT/ES/PT/JA + ISO).
-- **Gemini AI:**
+- **Gemini AI or free alternatives (Settings → AI Provider):**
+  - Google Gemini direct (default, needs a [Gemini API key](https://aistudio.google.com/apikey)).
+  - OpenAI-compatible provider: **OpenCode Zen** (key from `opencode.ai/auth`) with free
+    limited-time models **big-pickle**, **mimo-v2.5-free**, **muse-spark-1.3-contributor-free**,
+    or **OpenRouter** (free `xiaomi/mimo-v2-flash:free`, cheap contributor tiers) — any other
+    OpenAI-compatible endpoint works too; the model field accepts any id.
+  - All four AI features route through the selected provider:
   - `Expand` — seed → adjacent, producible book concepts (keyword, category, title idea, *why*),
     with existing-title + high-content rejection at generation time.
   - `Analyze Niche` — competitive read from your actual scraped SERP.
@@ -74,7 +80,7 @@ All thresholds are configurable in **Settings**:
 
 ## Install
 
-1. Download `kdp-copilot-v0.8.5.zip` from the
+1. Download `kdp-copilot-v0.8.6.zip` from the
    [Releases page](https://github.com/YoucefSennoun/kdp-copilot/releases) and unzip it.
 2. Open `chrome://extensions`.
 3. Enable **Developer mode** (top-right toggle).

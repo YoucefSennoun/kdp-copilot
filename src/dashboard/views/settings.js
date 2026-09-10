@@ -17,10 +17,26 @@ async function populateModelList(s) {
   sel.innerHTML = models.map((m) => `<option value="${escapeHtml(m)}">${escapeHtml(m)}</option>`).join('');
   if (s.model && models.includes(s.model)) sel.value = s.model;
   $('model-select').disabled = !modelList;
+  // Custom-provider presets feed the model datalist (free-text stays allowed).
+  const customs = (modelList && modelList.customModels) || [];
+  $('custom-model-list').innerHTML = customs
+    .map((m) => `<option value="${escapeHtml(m.id)}">${escapeHtml(m.label || m.id)}</option>`)
+    .join('');
+}
+
+function toggleProviderBlock() {
+  const custom = $('ai-provider').value === 'custom';
+  $('custom-ai-block').style.display = custom ? '' : 'none';
+  $('model-select').disabled = custom;
 }
 
 function fillForm(s) {
   $('api-key').value = s.apiKey || '';
+  $('ai-provider').value = s.aiProvider === 'custom' ? 'custom' : 'gemini';
+  $('custom-base-url').value = s.customBaseUrl || 'https://opencode.ai/zen/v1';
+  $('custom-api-key').value = s.customApiKey || '';
+  $('custom-model').value = s.customModel || 'big-pickle';
+  toggleProviderBlock();
   $('market-default').innerHTML = marketOptions();
   $('market-default').value = s.market || 'us';
   $('scraped-pages').value = String(s.scrapedPages || 1);
@@ -71,6 +87,10 @@ async function handleSave() {
     ...s,
     apiKey: $('api-key').value.trim() || null,
     model: $('model-select').value || undefined,
+    aiProvider: $('ai-provider').value === 'custom' ? 'custom' : 'gemini',
+    customBaseUrl: $('custom-base-url').value.trim() || 'https://opencode.ai/zen/v1',
+    customApiKey: $('custom-api-key').value.trim() || null,
+    customModel: $('custom-model').value.trim() || 'big-pickle',
     market: $('market-default').value || 'us',
     scrapedPages: parseInt($('scraped-pages').value, 10) || 1,
     autocompleteEnabled: $('opt-autocomplete').checked,
@@ -116,3 +136,4 @@ async function handleSave() {
 }
 
 $('save-settings-btn').addEventListener('click', handleSave);
+$('ai-provider').addEventListener('change', toggleProviderBlock);

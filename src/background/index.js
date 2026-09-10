@@ -54,7 +54,9 @@ import {
   localExpandSuggestions,
   computeSuggestionRelevance,
   getApiKey,
-  fetchModelChoices
+  hasCustomAI,
+  fetchModelChoices,
+  CUSTOM_MODEL_CHOICES
 } from './ai.js';
 import { computeDemandProxyScore, deriveSuggestionProxy } from '../lib/proxy.js';
 import { pickDiscoveryNodes } from '../lib/categories.js';
@@ -417,7 +419,7 @@ async function handleMessage(message, sender = {}) {
       return getSettings();
     case 'GET_MODELS': {
       const models = await fetchModelChoices();
-      return { models: models.map((m) => m.id) };
+      return { models: models.map((m) => m.id), customModels: CUSTOM_MODEL_CHOICES };
     }
     case 'SAVE_SETTINGS': {
       const saved = await saveSettings(message.settings || message.payload?.settings || {});
@@ -1009,6 +1011,7 @@ async function handleExpandSeed(seed, marketCode) {
   const thresholds = settingsToThresholds(settings);
 
   const apiKey = await getApiKey();
+  const aiAvailable = !!apiKey || await hasCustomAI();
 
   // One alphabet-soup run serves expansion AND the per-suggestion proxy.
   const corpus = await collectAutocompleteCorpus(seed, market.code, settings).catch(() => ({ amazon: [], google: [] }));
@@ -1019,7 +1022,7 @@ async function handleExpandSeed(seed, marketCode) {
   const scope = settings.contentScope || 'rule8';
 
   let suggestions;
-  if (apiKey) {
+  if (aiAvailable) {
     suggestions = await expandNicheSeeds({
       apiKey,
       seed,
@@ -1039,7 +1042,7 @@ async function handleExpandSeed(seed, marketCode) {
   }
 
   if (!suggestions.length) {
-    throw new Error('No suggestions could be generated. Add a Gemini API key or retry with a clearer seed.');
+    throw new Error('No suggestions could be generated. Add an AI provider (Gemini key or Zen/OpenRouter) or retry with a clearer seed.');
   }
 
   // Fix A (Revision 2): the content-type verdict was computed but never acted
@@ -1063,7 +1066,7 @@ async function handleExpandSeed(seed, marketCode) {
       skippedCt++;
       return false;
     }
-    if (classifyDrop(keyword, { dropUnknown: !!apiKey })) {
+    if (classifyDrop(keyword, { dropUnknown: aiAvailable })) {
       skippedCt++;
       return false;
     }
@@ -1755,7 +1758,7 @@ function sleep(ms) {
 
 async function handleAnalyzeNiche(keyword, market) {
   const apiKey = await getApiKey();
-  if (!apiKey) throw new Error('Set a Gemini API key in Settings first.');
+  if (!apiKey && !await hasCustomAI()) throw new Error('Set an AI provider in Settings first (Gemini key, or Zen/OpenRouter with a free model).');
 
   const record = await getKeyword(keyword, market);
   if (!record) throw new Error(`No data saved for "${keyword}". Scrape it first.`);
@@ -1776,7 +1779,7 @@ async function handleCheckTrademark(keyword, market, markets) {
       : DEFAULT_TRADEMARK_MARKETS)
   ).filter((mc) => TRADEMARK_REGISTRIES[mc]);
 
-  const scan = apiKey
+  const scan = (apiKey || await hasCustomAI())
     ? await checkTrademark({ apiKey, keyword, keywordRecord: record || {}, markets: sweepMarkets })
     : await localTrademarkSweep(keyword, record || {}, sweepMarkets);
 
@@ -1789,7 +1792,7 @@ async function handleCheckTrademark(keyword, market, markets) {
 
 async function handleGenerateListing(keyword, niche, market) {
   const apiKey = await getApiKey();
-  if (!apiKey) throw new Error('Set a Gemini API key in Settings first.');
+  if (!apiKey && !await hasCustomAI()) throw new Error('Set an AI provider in Settings first (Gemini key, or Zen/OpenRouter with a free model).');
 
   const record = await getKeyword(keyword, market);
   const listing = await generateListing({

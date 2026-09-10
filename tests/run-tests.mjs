@@ -19,7 +19,7 @@ import {
   deriveSuggestionProxy
 } from '../src/lib/proxy.js';
 import { classifyContentType, isLowContentNiche, scopeAllows } from '../src/lib/content-type.js';
-import { isSuggestibleSuggestion } from '../src/background/ai.js';
+import { isSuggestibleSuggestion, buildChatBody, parseChatResponse, buildResponsesBody, parseResponsesResponse, customTransportFor } from '../src/background/ai.js';
 import { parsePubDate, isFreshPub } from '../src/lib/dates.js';
 import { computeBrandRisk, matchBlockedBrand, matchFamousAuthor, computeAuthorFrequencyRisk, flagBrandedSamples } from '../src/lib/brands.js';
 import { buildRegistryLookups, localTrademarkScreen, COPYRIGHT_NOTE } from '../src/lib/trademark-registry.js';
@@ -788,6 +788,37 @@ console.log('\n[25] v0.8.3: automatic delivery-location pin (rule 7)');
   assert(glowMatchesZip('Deliver to London SW1A1AA', 'SW1A 1AA') === true, 'UK glow matches despite spacing');
   assert(glowMatchesZip('Deliver to New York 10001', '75001') === false, 'wrong zip does not match');
   assert(glowMatchesZip('', '75001') === false && glowMatchesZip(null, '75001') === false, 'empty glow never matches');
+}
+
+console.log('\n[26] v0.8.6: custom AI provider (Zen/OpenRouter transports)');
+{
+  assert(customTransportFor('muse-spark-1.3-contributor-free') === 'responses', 'Muse Spark free tier routes to Responses API');
+  assert(customTransportFor('big-pickle') === 'chat', 'Big Pickle routes to chat/completions');
+  assert(customTransportFor('  mimo-v2.5-free ') === 'chat', 'transport trims the model id');
+  assert(customTransportFor('xiaomi/mimo-v2-flash:free') === 'chat', 'OpenRouter free id routes to chat/completions');
+  assert(customTransportFor(null) === 'chat' && customTransportFor('') === 'chat', 'missing model defaults to chat');
+
+  const chatBody = buildChatBody({ model: 'big-pickle', systemInstruction: 'sys', prompt: '{"a":1}' });
+  assert(chatBody.model === 'big-pickle', 'chat body carries the model');
+  assert(chatBody.messages[0].role === 'system' && chatBody.messages[1].role === 'user', 'chat body uses system+user roles');
+  assert(chatBody.response_format && chatBody.response_format.type === 'json_object', 'chat body requests JSON mode');
+  const chatNoSys = buildChatBody({ model: 'm', prompt: '{"a":1}' });
+  assert(chatNoSys.messages.length === 1 && chatNoSys.messages[0].role === 'user', 'chat body omits system when absent');
+
+  assert(parseChatResponse({ choices: [{ message: { content: '{"risk":"low"}' } }] }).risk === 'low', 'chat response parses JSON content');
+  let threw = false;
+  try { parseChatResponse({ choices: [{ message: { content: '  ' } }] }); } catch { threw = true; }
+  assert(threw, 'empty chat response throws');
+
+  const respBody = buildResponsesBody({ model: 'muse-spark-1.3-contributor-free', prompt: '{"a":1}' });
+  assert(Array.isArray(respBody.input) && respBody.max_output_tokens > 0, 'responses body uses input array');
+  assert(
+    parseResponsesResponse({ output: [{ type: 'message', content: [{ type: 'output_text', text: '{"safe":true}' }] }] }).safe === true,
+    'responses output message parses'
+  );
+  threw = false;
+  try { parseResponsesResponse({ output: [] }); } catch { threw = true; }
+  assert(threw, 'empty responses output throws');
 }
 
 console.log(`\n${passed} passed, ${failed} failed`);

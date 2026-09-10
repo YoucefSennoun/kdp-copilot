@@ -16,7 +16,189 @@ export const MODEL_CHOICES = [
 
 const MODEL_LIST_URL = 'https://generativelanguage.googleapis.com/v1beta/models';
 
+// ---------------------------------------------------------------------------
+// Custom OpenAI-compatible provider (OpenCode Zen / OpenRouter / CometAPI…).
+// Free options that work for Analyze / Listing / Legal / Expand:
+//   Zen (https://opencode.ai/zen/v1, key from opencode.ai/auth):
+//     big-pickle, mimo-v2.5-free            → chat/completions (OpenAI shape)
+//     muse-spark-1.3-contributor-free       → /responses (Responses API only)
+//   OpenRouter (https://openrouter.ai/api/v1):
+//     xiaomi/mimo-v2-flash:free (free), meta/muse-spark-1.3-contributor (cheap)
+// The model field stays free-text, so any future :free id works unmodified.
+// ---------------------------------------------------------------------------
+
+export const DEFAULT_CUSTOM_BASE_URL = 'https://opencode.ai/zen/v1';
+export const DEFAULT_CUSTOM_MODEL = 'big-pickle';
+
+export const CUSTOM_BASE_URLS = [
+  { id: 'https://opencode.ai/zen/v1', label: 'OpenCode Zen (free: Big Pickle, MiMo-V2.5, Muse Spark 1.3 Contributor)' },
+  { id: 'https://openrouter.ai/api/v1', label: 'OpenRouter (free :free models + cheap tiers)' }
+];
+
+// transport: 'chat' = POST {base}/chat/completions; 'responses' = POST
+// {base}/responses (OpenAI Responses API — Zen serves the Muse Spark free
+// tier only there).
+export const CUSTOM_MODEL_CHOICES = [
+  { id: 'big-pickle', label: 'Big Pickle (Zen, FREE, limited time)', api: 'chat' },
+  { id: 'mimo-v2.5-free', label: 'MiMo-V2.5 Free (Zen, FREE, limited time)', api: 'chat' },
+  { id: 'muse-spark-1.3-contributor-free', label: 'Muse Spark 1.3 Contributor Free (Zen, FREE, limited time)', api: 'responses' },
+  { id: 'xiaomi/mimo-v2-flash:free', label: 'MiMo-V2-Flash (OpenRouter, FREE)', api: 'chat' },
+  { id: 'meta/muse-spark-1.3-contributor', label: 'Muse Spark 1.3 Contributor (OpenRouter, ~$0.10/$0.20 per 1M)', api: 'chat' }
+];
+
+const RESPONSES_API_MODELS = new Set(
+  CUSTOM_MODEL_CHOICES.filter((m) => m.api === 'responses').map((m) => m.id)
+);
+
+/** Which HTTP API a custom model id needs. Pure — safe to unit-test. */
+export function customTransportFor(model) {
+  return RESPONSES_API_MODELS.has(String(model || '').trim()) ? 'responses' : 'chat';
+}
+
+/** Resolved AI configuration from stored settings. */
+export async function getAIConfig() {
+  const { kdpSettings } = await chrome.storage.local.get(['kdpSettings']);
+  const s = kdpSettings || {};
+  return {
+    provider: s.aiProvider === 'custom' ? 'custom' : 'gemini',
+    geminiKey: s.apiKey || '',
+    geminiModel: s.model || DEFAULT_MODEL,
+    customBaseUrl: String(s.customBaseUrl || DEFAULT_CUSTOM_BASE_URL).replace(/\/+$/, ''),
+    customKey: s.customApiKey || '',
+    customModel: String(s.customModel || DEFAULT_CUSTOM_MODEL).trim()
+  };
+}
+
+/** True when a custom provider is selected AND has a key. Never throws. */
+export async function hasCustomAI() {
+  try {
+    const cfg = await getAIConfig();
+    return cfg.provider === 'custom' && !!cfg.customKey;
+  } catch {
+    return false;
+  }
+}
+
+/** OpenAI chat/completions request body. Pure — safe to unit-test. */
+export function buildChatBody({ model, systemInstruction, prompt }) {
+  const messages = [];
+  if (systemInstruction) messages.push({ role: 'system', content: systemInstruction });
+  messages.push({ role: 'user', content: prompt });
+  return {
+    model,
+    messages,
+    temperature: 0.7,
+    max_tokens: MAX_OUTPUT_TOKENS,
+    response_format: { type: 'json_object' }
+  };
+}
+
+/** Extract the JSON payload from a chat/completions response. Pure. */
+export function parseChatResponse(data) {
+  const text = data?.choices?.[0]?.message?.content;
+  if (!text || !String(text).trim()) throw new Error('Model returned an empty response.');
+  return sanitizeJson(text);
+}
+
+/** OpenAI Responses API request body. Pure — safe to unit-test. */
+export function buildResponsesBody({ model, systemInstruction, prompt }) {
+  const input = [];
+  if (systemInstruction) input.push({ role: 'system', content: systemInstruction });
+  input.push({ role: 'user', content: prompt });
+  return { model, input, max_output_tokens: MAX_OUTPUT_TOKENS };
+}
+
+/** Extract the JSON payload from a Responses API response. Pure. */
+export function parseResponsesResponse(data) {
+  const out = Array.isArray(data?.output) ? data.output : [];
+  const text = out
+    .filter((item) => item && (item.type === 'message' || item.type === 'output_text'))
+    .flatMap((item) => {
+      if (item.type === 'output_text') return [item.text];
+      return (Array.isArray(item.content) ? item.content : [])
+        .filter((c) => c && c.type === 'output_text')
+        .map((c) => c.text);
+    })
+    .join('');
+  if (!text.trim()) throw new Error('Model returned an empty response.');
+  return sanitizeJson(text);
+}
+
+function providerLabelFor(baseUrl) {
+  const base = String(baseUrl || '');
+  if (base.includes('opencode.ai')) return 'OpenCode Zen';
+  if (base.includes('openrouter.ai')) return 'OpenRouter';
+  return 'Custom AI';
+}
+
+async function postJson(url, apiKey, body, label) {
+  const res = await fetch(url, {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      Authorization: `Bearer ${apiKey}`,
+      ...(label === 'OpenRouter'
+        ? { 'HTTP-Referer': 'https://github.com/YoucefSennoun/kdp-copilot', 'X-Title': 'KDP Copilot' }
+        : {})
+    },
+    body: JSON.stringify(body)
+  });
+  if (!res.ok) {
+    let detail = '';
+    try {
+      const parsed = await res.json();
+      detail = parsed?.error?.message || JSON.stringify(parsed);
+    } catch {
+      detail = await res.text();
+    }
+    throw new Error(`${label} API error ${res.status}: ${detail}`);
+  }
+  return res.json();
+}
+
+export async function callCustomAI({ baseUrl, apiKey, model, systemInstruction, prompt }) {
+  if (!apiKey) throw new Error('Custom AI provider has no API key — add one in Settings.');
+  if (!model) throw new Error('Custom AI provider has no model — pick one in Settings.');
+  const base = String(baseUrl || DEFAULT_CUSTOM_BASE_URL).replace(/\/+$/, '');
+  const label = providerLabelFor(base);
+  if (customTransportFor(model) === 'responses') {
+    const data = await postJson(`${base}/responses`, apiKey, buildResponsesBody({ model, systemInstruction, prompt }), label);
+    return parseResponsesResponse(data);
+  }
+  const data = await postJson(`${base}/chat/completions`, apiKey, buildChatBody({ model, systemInstruction, prompt }), label);
+  return parseChatResponse(data);
+}
+
+/**
+ * Single entry point for every AI feature (Expand, Analyze, Listing, Legal).
+ * Routes to the configured provider: custom (Zen/OpenRouter/…) when selected
+ * with a key, otherwise Gemini. Also fixes the stored Gemini model actually
+ * being used (callers never passed it, so the Settings choice was ignored).
+ */
+export async function completeJson({ apiKey, model, systemInstruction, prompt }) {
+  const cfg = await getAIConfig().catch(() => null);
+  if (cfg && cfg.provider === 'custom' && cfg.customKey) {
+    return callCustomAI({
+      baseUrl: cfg.customBaseUrl,
+      apiKey: cfg.customKey,
+      model: cfg.customModel,
+      systemInstruction,
+      prompt
+    });
+  }
+  return callGemini({
+    apiKey: apiKey || (cfg && cfg.geminiKey) || '',
+    model: (cfg && cfg.geminiModel) || model || DEFAULT_MODEL,
+    systemInstruction,
+    prompt
+  });
+}
+
 export async function fetchModelChoices() {
+  const cfg = await getAIConfig().catch(() => null);
+  // The custom provider has no small live model list worth fetching (the
+  // OpenRouter catalog is hundreds of models) — serve the curated presets.
+  if (cfg && cfg.provider === 'custom') return CUSTOM_MODEL_CHOICES;
   const apiKey = await getApiKey();
   if (!apiKey) return MODEL_CHOICES;
   try {
@@ -198,7 +380,7 @@ function buildExpansionPrompt(seed, market, count, scope = 'rule8') {
 
 export async function expandNicheSeeds({ apiKey, seed, market, count = 10, allowFiction = true, scope = 'rule8' }) {
   const prompt = buildExpansionPrompt(seed, market, count, scope);
-  const data = await callGemini({ apiKey, prompt });
+  const data = await completeJson({ apiKey, prompt });
   const niches = Array.isArray(data) ? data : data?.niches;
   if (!Array.isArray(niches)) throw new Error('Model response missing "niches" array.');
   return niches
@@ -294,7 +476,7 @@ function buildAnalysisPrompt(keyword, keywordRecord) {
 
 export async function analyzeNiche({ apiKey, keyword, keywordRecord }) {
   const prompt = buildAnalysisPrompt(keyword, keywordRecord);
-  return callGemini({ apiKey, prompt });
+  return completeJson({ apiKey, prompt });
 }
 
 // ---------------------------------------------------------------------------
@@ -323,7 +505,7 @@ function buildListingPrompt(niche, keywordRecord) {
 
 export async function generateListing({ apiKey, niche, keywordRecord }) {
   const prompt = buildListingPrompt(niche, keywordRecord);
-  return callGemini({ apiKey, prompt });
+  return completeJson({ apiKey, prompt });
 }
 
 // ---------------------------------------------------------------------------
@@ -370,7 +552,7 @@ function buildLegalPrompt(keyword, keywordRecord, markets) {
 
 export async function checkTrademark({ apiKey, keyword, keywordRecord, markets }) {
   const prompt = buildLegalPrompt(keyword, keywordRecord, markets);
-  const data = await callGemini({ apiKey, prompt });
+  const data = await completeJson({ apiKey, prompt });
   return { ...data, ai: true, keyword, markets: markets || [] };
 }
 
@@ -386,7 +568,7 @@ export async function localTrademarkSweep(keyword, keywordRecord, markets) {
   scan.market = keywordRecord?.market || 'us';
   scan.notes = [
     'Local multi-market screen, not a legal opinion. Use the per-market registry links for official records.',
-    'Add your Gemini API key in Settings for a thorough AI trademark and copyright review.'
+    'Configure an AI provider in Settings (Gemini key, or Zen / OpenRouter with a free model) for a thorough AI trademark and copyright review.'
   ];
   return scan;
 }

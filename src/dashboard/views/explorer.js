@@ -246,7 +246,7 @@ async function handleRowAction(keyword, act) {
   try {
     switch (act) {
       case 'ai': {
-        showStatus($('status'), `Analyzing "${keyword}" with Gemini…`);
+        showStatus($('status'), `Analyzing "${keyword}" with AI…`);
         const r = await send('ANALYZE_NICHE', { keyword, market });
         openDetailDrawer(keyword, { market, analysis: r });
         break;
