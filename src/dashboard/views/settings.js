@@ -33,9 +33,9 @@ function toggleProviderBlock() {
 function fillForm(s) {
   $('api-key').value = s.apiKey || '';
   $('ai-provider').value = s.aiProvider === 'custom' ? 'custom' : 'gemini';
-  $('custom-base-url').value = s.customBaseUrl || 'https://opencode.ai/zen/v1';
+  $('custom-base-url').value = s.customBaseUrl || 'https://openrouter.ai/api/v1';
   $('custom-api-key').value = s.customApiKey || '';
-  $('custom-model').value = s.customModel || 'big-pickle';
+  $('custom-model').value = s.customModel || 'xiaomi/mimo-v2-flash:free';
   toggleProviderBlock();
   $('market-default').innerHTML = marketOptions();
   $('market-default').value = s.market || 'us';
@@ -88,9 +88,9 @@ async function handleSave() {
     apiKey: $('api-key').value.trim() || null,
     model: $('model-select').value || undefined,
     aiProvider: $('ai-provider').value === 'custom' ? 'custom' : 'gemini',
-    customBaseUrl: $('custom-base-url').value.trim() || 'https://opencode.ai/zen/v1',
+    customBaseUrl: $('custom-base-url').value.trim() || 'https://openrouter.ai/api/v1',
     customApiKey: $('custom-api-key').value.trim() || null,
-    customModel: $('custom-model').value.trim() || 'big-pickle',
+    customModel: $('custom-model').value.trim() || 'xiaomi/mimo-v2-flash:free',
     market: $('market-default').value || 'us',
     scrapedPages: parseInt($('scraped-pages').value, 10) || 1,
     autocompleteEnabled: $('opt-autocomplete').checked,

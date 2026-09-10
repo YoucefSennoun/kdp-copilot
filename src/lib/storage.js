@@ -291,10 +291,10 @@ export async function clearDiscoveryRuns() {
 export const DEFAULT_SETTINGS = {
   apiKey: '',
   model: 'gemini-3.6-flash',
-  aiProvider: 'gemini', // 'gemini' | 'custom' (OpenCode Zen / OpenRouter / …)
-  customBaseUrl: 'https://opencode.ai/zen/v1',
+  aiProvider: 'gemini', // 'gemini' | 'custom' (OpenRouter / OpenCode Zen / …)
+  customBaseUrl: 'https://openrouter.ai/api/v1',
   customApiKey: '',
-  customModel: 'big-pickle',
+  customModel: 'xiaomi/mimo-v2-flash:free',
   market: 'us',
   autocompleteEnabled: true,
   googleSuggestEnabled: true,

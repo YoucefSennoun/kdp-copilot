@@ -279,21 +279,22 @@
           </select>
           <div id="custom-ai-block">
             <label for="custom-base-url">API Base URL</label>
-            <input id="custom-base-url" type="text" list="custom-base-list" placeholder="https://opencode.ai/zen/v1" />
+            <input id="custom-base-url" type="text" list="custom-base-list" placeholder="https://openrouter.ai/api/v1" />
             <datalist id="custom-base-list">
-              <option value="https://opencode.ai/zen/v1">OpenCode Zen (free models)</option>
-              <option value="https://openrouter.ai/api/v1">OpenRouter</option>
+              <option value="https://openrouter.ai/api/v1">OpenRouter (free :free models work externally)</option>
+              <option value="https://opencode.ai/zen/v1">OpenCode Zen (free tier is OpenCode-app-only; paid credit works)</option>
             </datalist>
             <label for="custom-api-key">API Key</label>
-            <input id="custom-api-key" type="password" placeholder="Zen key (opencode.ai/auth) or OpenRouter key" />
+            <input id="custom-api-key" type="password" placeholder="OpenRouter key (openrouter.ai/keys) or Zen key" />
             <label for="custom-model">Model (pick a preset or type any id)</label>
-            <input id="custom-model" type="text" list="custom-model-list" placeholder="big-pickle" />
+            <input id="custom-model" type="text" list="custom-model-list" placeholder="xiaomi/mimo-v2-flash:free" />
             <datalist id="custom-model-list"></datalist>
             <p class="muted" style="font-size:.85rem;">
-              Free on Zen (limited time): <b>big-pickle</b>, <b>mimo-v2.5-free</b>,
-              <b>muse-spark-1.3-contributor-free</b>. Free on OpenRouter:
-              <b>xiaomi/mimo-v2-flash:free</b>. Without any key, expansion falls back
-              to live Amazon + Google autocomplete.
+              Works externally: <b>xiaomi/mimo-v2-flash:free</b> and other OpenRouter
+              <b>:free</b> models (free key at openrouter.ai/keys). Zen's free models
+              (big-pickle, mimo-v2.5-free, muse-spark-1.3-contributor-free) only answer
+              inside the OpenCode app — from this extension they need paid Zen credit.
+              When this provider is selected, Analyze, Listing, Legal sweep and AI Expand all use it instead of Gemini.
             </p>
           </div>
           <div class="grid" style="grid-template-columns: repeat(2, 1fr);">
