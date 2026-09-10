@@ -233,7 +233,7 @@ async function handleStartOver() {
     await send('CLEAR_ALL');
     allKeywords = [];
     renderTable();
-    showStatus($('status'), 'Workspace cleared.');
+    showStatus($('status'), 'Workspace cleared and queue paused. Your next Research will resume it automatically.');
   } catch (err) {
     showStatus($('status'), err.message, true);
   }

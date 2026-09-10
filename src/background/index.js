@@ -322,12 +322,24 @@ async function handleMessage(message, sender = {}) {
       return clearKeywords();
     case 'CLEAR_ALL':
       scrapeQueue.abort();
-      await setPausedFlag(false);
+      // Stop a mid-flight discovery run: its wait loop breaks on active=false
+      // and its epoch guard (below) drops the pending put/enqueue steps.
+  discoveryState.active = false;
+
+  // Start-Over arrived mid-run (CLEAR_ALL flips active=false and bumps the
+  // queue epoch): drop everything instead of re-populating a cleared workspace.
+  if (epoch !== scrapeQueue.epoch) return { count: 0, discovered: [], aborted: true };
+      discoveryState.found = [];
       await clearKeywords();
       await clearSuggestions();
       await clearAnalyses();
       await clearLegals();
       await clearDiscoveryRuns();
+      // Stay paused after a reset so strays (manually-opened Amazon pages,
+      // late parse messages) can only save locally — never open new tabs.
+      // The next explicit Research/Expand/Scrape auto-resumes the queue.
+      scrapeQueue.stop();
+      await setPausedFlag(true);
       return true;
 
     // Suggestions (Amazon + Google autocomplete)
@@ -992,6 +1004,7 @@ async function collectAutocompleteCorpus(keyword, marketCode, settings) {
 
 async function handleExpandSeed(seed, marketCode) {
   const settings = await getSettings();
+  const epoch = scrapeQueue.epoch; // Start-Over guard: abandon puts/enqueues on reset
   const market = getMarket(marketCode || settings.market);
   const thresholds = settingsToThresholds(settings);
 
@@ -1094,6 +1107,7 @@ async function handleExpandSeed(seed, marketCode) {
 
   const records = [];
   for (const s of candidates) {
+    if (epoch !== scrapeQueue.epoch) return { keywords: [], ai: [], count: 0, dropped: skippedCt, proxy: seedProxy, aborted: true };
     const keyword = String(s.keyword || s || '').trim();
     let demandProxyScore = deriveSuggestionProxy(keyword, corpus, seedProxy.score);
     let keywordSuggested = keyword === seed ? seedSuggested : null;
@@ -1163,6 +1177,7 @@ async function handleExpandSeed(seed, marketCode) {
         expandedFrom: seed,
         score: s.score || 0
       }));
+    if (epoch !== scrapeQueue.epoch) return { keywords: [], ai: [], count: 0, dropped: skippedCt, proxy: seedProxy, aborted: true };
     if (suggestionRows.length) await putSuggestions(suggestionRows);
   }
 
@@ -1201,14 +1216,30 @@ function computeSuggestionQualifies(scored, thresholds, keyword, allowFiction = 
 }
 
 async function fetchSuggestions({ seed, market }) {
-  if (!seed || !seed.trim()) return { amazon: [], google: [] };
+  if (!seed || !seed.trim()) return { amazon: [], google: [], warnings: [] };
   const settings = await getSettings();
   const marketCode = getMarket(market || settings.market).code;
   const cleanSeed = seed.trim().toLowerCase();
-  const amazon = settings.autocompleteEnabled !== false
-    ? await amazonAutocomplete(seed, marketCode) : [];
-  const google = settings.googleSuggestEnabled !== false
-    ? await googleSuggest(seed, marketCode) : [];
+  // Per-engine fail-soft: Google throttles automated traffic with occasional
+  // HTTP 403s (bot mitigation on a free, keyless endpoint — not API quota).
+  // One dead engine must not kill the other; partial results still persist.
+  const warnings = [];
+  let amazon = [];
+  let google = [];
+  if (settings.autocompleteEnabled !== false) {
+    try {
+      amazon = await amazonAutocomplete(seed, marketCode);
+    } catch (err) {
+      warnings.push(`Amazon autocomplete unavailable: ${err.message}`);
+    }
+  }
+  if (settings.googleSuggestEnabled !== false) {
+    try {
+      google = await googleSuggest(seed, marketCode);
+    } catch (err) {
+      warnings.push(`Google Suggest unavailable: ${err.message}`);
+    }
+  }
 
   // Persist so the Suggestions tab (GET_SUGGESTIONS) and EXPAND_FROM_SUGGESTIONS
   // actually see them — previously this fetched but never stored, leaving the
@@ -1234,7 +1265,7 @@ async function fetchSuggestions({ seed, market }) {
   google.forEach((t) => pushRow(t, 'google-suggest'));
   if (rows.length) await putSuggestions(rows);
 
-  return { amazon, google };
+  return { amazon, google, warnings };
 }
 
 // v0.8.2: suggest fetches time out instead of hanging a whole Research run
@@ -1261,6 +1292,14 @@ export async function amazonAutocomplete(seed, marketCode) {
           'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0 Safari/537.36'
       }
     });
+    if (res.status === 403 || res.status === 429) {
+      // Throttled (bot mitigation): back off once, then retry. Still failing
+      // afterwards throws and the caller degrades gracefully per engine.
+      if (attempt === 1) {
+        await new Promise((r) => setTimeout(r, 2500));
+        continue;
+      }
+    }
     if (!res.ok) throw new Error(`Amazon suggest ${res.status}`);
     let data = {};
     try {
@@ -1284,6 +1323,13 @@ export async function googleSuggest(seed, marketCode) {
   const url = googleSuggestUrl(seed, market.code);
   for (let attempt = 1; attempt <= 2; attempt++) {
     const res = await fetchWithTimeout(url, { headers: { 'X-Chrome-UMA-Enabled': '1' } });
+    if (res.status === 403 || res.status === 429) {
+      // Same throttling back-off as Amazon (see above).
+      if (attempt === 1) {
+        await new Promise((r) => setTimeout(r, 2500));
+        continue;
+      }
+    }
     if (!res.ok) throw new Error(`Google suggest ${res.status}`);
     let data = [];
     try {
@@ -1317,6 +1363,7 @@ export async function googleSuggest(seed, marketCode) {
 
 async function handleResearchFormat(seed, marketCode) {
   const settings = await getSettings();
+  const epoch = scrapeQueue.epoch; // Start-Over guard: abandon the enqueue on reset
   const market = getMarket(marketCode || settings.market);
   const thresholds = settingsToThresholds(settings);
   const keyword = (seed || '').trim();
@@ -1342,6 +1389,9 @@ async function handleResearchFormat(seed, marketCode) {
 
   // ── Step 2: Queue SERP scrapes for seed + all discovered phrases ────────
   const settingsFmt = settings.formatFilter || null;
+  if (epoch !== scrapeQueue.epoch) {
+    return { keyword, phrasesFound: uniquePhrases.length, tasksQueued: 0, corpus: { amazon: corpus.amazon.length, google: corpus.google.length }, aborted: true };
+  }
   const tasks = uniquePhrases.map((phrase) => ({
     keyword: phrase,
     market: market.code,
@@ -1367,6 +1417,7 @@ async function handleResearchFormat(seed, marketCode) {
 
 async function expandFromSuggestions(marketCode) {
   const settings = await getSettings();
+  const epoch = scrapeQueue.epoch; // Start-Over guard: abandon the put/enqueue on reset
   const market = getMarket(marketCode || settings.market);
   const thresholds = settingsToThresholds(settings);
   const all = await getAllSuggestions();
@@ -1413,6 +1464,7 @@ async function expandFromSuggestions(marketCode) {
     })
     .filter(Boolean);
 
+  if (epoch !== scrapeQueue.epoch) return { count: 0, aborted: true };
   if (records.length) await putKeywords(records);
   enqueueScraping(records.map((r) => r.keyword), market.code);
   return { count: records.length };
@@ -1528,6 +1580,7 @@ async function runDiscovery({
   silent = false
 } = {}) {
   const settings = await getSettings();
+  const epoch = scrapeQueue.epoch; // Start-Over guard: abandon the put/enqueue on reset
   const market = getMarket(marketCode || settings.market);
   const thresholds = settingsToThresholds(settings);
   const count = Math.max(1, categoryCount || settings.discoveryCategoryCount || 8);
@@ -1672,6 +1725,7 @@ async function runDiscovery({
     };
   });
 
+  if (epoch !== scrapeQueue.epoch) return { count: 0, discovered: [], aborted: true };
   await putKeywords(records);
   enqueueScraping(records.map((r) => r.keyword), market.code);
   await addDiscoveryRun({

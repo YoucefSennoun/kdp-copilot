@@ -49,18 +49,31 @@ function renderTable(list) {
   body.querySelectorAll('.suggest-expand').forEach((a) =>
     a.addEventListener('click', async (e) => {
       e.preventDefault();
-      const market = (a.dataset.market || (await settings()).market || 'us');
-      await send('EXPAND_SEED', { seed: a.dataset.keyword, market });
-      showStatus($('suggest-status'), `Expanded "${a.dataset.keyword}" and queued scraping.`);
-      refresh();
+      a.style.pointerEvents = 'none';
+      a.style.opacity = '0.4';
+      try {
+        const market = (a.dataset.market || (await settings()).market || 'us');
+        await send('EXPAND_SEED', { seed: a.dataset.keyword, market });
+        showStatus($('suggest-status'), `Expanded "${a.dataset.keyword}" and queued scraping.`);
+        refresh();
+      } catch (err) {
+        showStatus($('suggest-status'), `Expand failed for "${a.dataset.keyword}": ${err.message}`, true);
+      } finally {
+        a.style.pointerEvents = '';
+        a.style.opacity = '';
+      }
     })
   );
   body.querySelectorAll('.suggest-scrape').forEach((a) =>
     a.addEventListener('click', async (e) => {
       e.preventDefault();
-      const market = (a.dataset.market || (await settings()).market || 'us');
-      await send('SCRAPE_KEYWORD', { keyword: a.dataset.keyword, market });
-      showStatus($('suggest-status'), `Queued scrape for "${a.dataset.keyword}".`);
+      try {
+        const market = (a.dataset.market || (await settings()).market || 'us');
+        await send('SCRAPE_KEYWORD', { keyword: a.dataset.keyword, market });
+        showStatus($('suggest-status'), `Queued scrape for "${a.dataset.keyword}".`);
+      } catch (err) {
+        showStatus($('suggest-status'), `Scrape failed for "${a.dataset.keyword}": ${err.message}`, true);
+      }
     })
   );
 }
@@ -74,7 +87,13 @@ $('suggest-go').addEventListener('click', async () => {
   const s = await settings();
   try {
     const r = await send('FETCH_SUGGESTIONS', { seed, market: s.market });
-    showStatus($('suggest-status'), `Saved ${r.amazon.length} Amazon + ${r.google.length} Google suggestions for "${seed}".`);
+    const warnings = Array.isArray(r.warnings) ? r.warnings : [];
+    const saved = (r.amazon.length || 0) + (r.google.length || 0);
+    if (!saved && warnings.length) {
+      showStatus($('suggest-status'), `No suggestions for "${seed}" — ${warnings.join(' ')}`, true);
+    } else {
+      showStatus($('suggest-status'), `Saved ${r.amazon.length} Amazon + ${r.google.length} Google suggestions for "${seed}".${warnings.length ? ` Note: ${warnings.join(' ')}` : ''}`);
+    }
     refresh();
   } catch (err) {
     showStatus($('suggest-status'), err.message, true);

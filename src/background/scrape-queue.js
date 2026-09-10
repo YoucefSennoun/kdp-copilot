@@ -50,6 +50,11 @@ class ScrapeQueue {
     this.listeners = new Set();
     this.completed = 0;
     this.failed = 0;
+    // Generation counter: bumped on every hard reset (abort). Long-running
+    // producer flows (expansion, research, discovery) capture it at entry and
+    // abandon their put/enqueue steps when it changes — so "Start over"
+    // can never be followed by a stale flow re-populating the queue.
+    this.epoch = 0;
   }
 
   setHandler(fn) {
@@ -112,6 +117,7 @@ class ScrapeQueue {
    */
   abort() {
     this.queue.length = 0;
+    this.epoch++;
     this.pendingTabs.forEach((pending, tabId) => {
       clearTimeout(pending.timer);
       this._safeClose(tabId);
