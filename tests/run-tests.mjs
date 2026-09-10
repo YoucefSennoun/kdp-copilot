@@ -19,7 +19,7 @@ import {
   deriveSuggestionProxy
 } from '../src/lib/proxy.js';
 import { classifyContentType, isLowContentNiche, scopeAllows } from '../src/lib/content-type.js';
-import { isSuggestibleSuggestion, buildChatBody, parseChatResponse, buildResponsesBody, parseResponsesResponse, customTransportFor, sanitizeGeminiModel, fetchModelChoices } from '../src/background/ai.js';
+import { isSuggestibleSuggestion, buildChatBody, parseChatResponse, buildResponsesBody, parseResponsesResponse, customTransportFor, sanitizeGeminiModel, fetchModelChoices, sanitizeJson, isJsonFormatError } from '../src/background/ai.js';
 import { parsePubDate, isFreshPub } from '../src/lib/dates.js';
 import { computeBrandRisk, matchBlockedBrand, matchFamousAuthor, computeAuthorFrequencyRisk, flagBrandedSamples } from '../src/lib/brands.js';
 import { buildRegistryLookups, localTrademarkScreen, COPYRIGHT_NOTE } from '../src/lib/trademark-registry.js';
@@ -828,6 +828,21 @@ console.log('\n[27] v0.8.10: provider switching keeps each model list intact');
   assert(sanitizeGeminiModel('') === 'gemini-3.6-flash' && sanitizeGeminiModel(null) === 'gemini-3.6-flash', 'missing Gemini model heals to default');
   const customs = await fetchModelChoices('custom');
   assert(Array.isArray(customs) && customs.some((m) => m.id === 'xiaomi/mimo-v2.5'), 'explicit custom list serves presets without stored settings');
+}
+
+console.log('\n[28] v0.8.12: tolerant JSON parsing for sloppy model output');
+{
+  assert(sanitizeJson('{"a":1}').a === 1, 'clean JSON passes through');
+  assert(sanitizeJson('```json\n{"a":1}\n```').a === 1, 'fenced JSON extracted');
+  assert(sanitizeJson('Here you go: {"a":1} hope it helps').a === 1, 'prose-wrapped JSON extracted');
+  assert(sanitizeJson('{"a":1,"b":[2,3,],}').b.length === 2, 'trailing commas repaired');
+  assert(sanitizeJson('{a:1, "b":2}').a === 1, 'bare property names quoted as last resort');
+  let threw = false;
+  try { sanitizeJson('not json at all'); } catch { threw = true; }
+  assert(threw, 'non-JSON still throws');
+  assert(isJsonFormatError(new SyntaxError('Expected double-quoted property name in JSON at position 4982')) === true, 'V8 parse error is retryable');
+  assert(isJsonFormatError(new Error('Model returned an unexpected response format.')) === true, 'format error is retryable');
+  assert(isJsonFormatError(new Error('OpenRouter API error 401: bad key')) === false, 'auth errors are not retryable as format errors');
 }
 
 console.log(`\n${passed} passed, ${failed} failed`);

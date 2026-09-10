@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "KDP Copilot",
-  "version": "0.8.11",
+  "version": "0.8.12",
   "description": "Amazon KDP Niche & Keyword Research Copilot — rules-v1 engine (fresh <6mo sellers, BSR≤200k, 1000/800 listing caps, author-brand & trademark screens, full A-Z search-volume proof, 20 markets, Books-only + format filter, FBA/MyResearchBase cross-check) + Gemini AI",
   "permissions": ["storage", "tabs", "scripting", "alarms"],
   "host_permissions": [

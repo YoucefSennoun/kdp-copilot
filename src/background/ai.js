@@ -194,21 +194,36 @@ export async function callCustomAI({ baseUrl, apiKey, model, systemInstruction, 
  */
 export async function completeJson({ apiKey, model, systemInstruction, prompt }) {
   const cfg = await getAIConfig().catch(() => null);
-  if (cfg && cfg.provider === 'custom' && cfg.customKey) {
-    return callCustomAI({
-      baseUrl: cfg.customBaseUrl,
-      apiKey: cfg.customKey,
-      model: cfg.customModel,
+  const once = (p) => {
+    if (cfg && cfg.provider === 'custom' && cfg.customKey) {
+      return callCustomAI({
+        baseUrl: cfg.customBaseUrl,
+        apiKey: cfg.customKey,
+        model: cfg.customModel,
+        systemInstruction,
+        prompt: p
+      });
+    }
+    return callGemini({
+      apiKey: apiKey || (cfg && cfg.geminiKey) || '',
+      model: (cfg && cfg.geminiModel) || model || DEFAULT_MODEL,
       systemInstruction,
-      prompt
+      prompt: p
     });
+  };
+  try {
+    return await once(prompt);
+  } catch (err) {
+    // Cheap/free models often fumble the JSON on the first try despite the
+    // repairs above — one retry with an explicit strict-JSON instruction
+    // recovers most of them instead of surfacing a parse error.
+    if (!isJsonFormatError(err)) throw err;
+    try {
+      return await once(`${prompt}${JSON_REPAIR_NOTE}`);
+    } catch (retryErr) {
+      throw new Error(`AI returned data that could not be read as JSON even after a retry (${retryErr.message}). Try again or switch model.`);
+    }
   }
-  return callGemini({
-    apiKey: apiKey || (cfg && cfg.geminiKey) || '',
-    model: (cfg && cfg.geminiModel) || model || DEFAULT_MODEL,
-    systemInstruction,
-    prompt
-  });
 }
 
 export async function fetchModelChoices(provider) {
@@ -250,23 +265,73 @@ export async function getApiKey() {
   return (kdpSettings && kdpSettings.apiKey) || '';
 }
 
-function sanitizeJson(text) {
+/**
+ * Parse model output into JSON, tolerating the sloppiness cheap/free models
+ * add around the payload: markdown fences, prose wrappers, trailing commas,
+ * stray control characters, and (last resort) unquoted property names.
+ * Throws the original SyntaxError when nothing parses.
+ */
+export function sanitizeJson(text) {
   const trimmed = (text || '').trim();
   if (!trimmed) return null;
+  const candidates = [];
   if (trimmed[0] === '[' || trimmed[0] === '{') {
-    return JSON.parse(trimmed);
+    candidates.push(trimmed);
   }
   const fenced = trimmed.match(/```(?:json)?\s*([\s\S]*?)```/);
-  if (fenced) return JSON.parse(fenced[1].trim());
+  if (fenced) candidates.push(fenced[1].trim());
   const start = trimmed.indexOf('[') === -1 ? trimmed.indexOf('{') : trimmed.indexOf('[');
-  const open = trimmed[start];
-  const close = open === '[' ? ']' : '}';
-  const end = trimmed.lastIndexOf(close);
-  if (start !== -1 && end > start) {
-    return JSON.parse(trimmed.slice(start, end + 1));
+  if (start !== -1) {
+    const open = trimmed[start];
+    const close = open === '[' ? ']' : '}';
+    const end = trimmed.lastIndexOf(close);
+    if (end > start) candidates.push(trimmed.slice(start, end + 1));
   }
-  throw new Error('Model returned an unexpected response format.');
+  if (!candidates.length) throw new Error('Model returned an unexpected response format.');
+
+  let lastErr = null;
+  for (const raw of candidates) {
+    // 1. verbatim
+    try {
+      return JSON.parse(raw);
+    } catch (err) {
+      lastErr = err;
+    }
+    // 2. trailing commas: {"a":1,} / [1,2,]
+    try {
+      return JSON.parse(raw.replace(/,\s*([}\]])/g, '$1'));
+    } catch (err) {
+      lastErr = err;
+    }
+    // 3. trailing commas + stray control characters
+    try {
+      // eslint-disable-next-line no-control-regex
+      return JSON.parse(raw.replace(/,\s*([}\]])/g, '$1').replace(/[\x00-\x08\x0B\x0C\x0E-\x1F]/g, ''));
+    } catch (err) {
+      lastErr = err;
+    }
+    // 4. last resort: quote bare property names ({key: …} → {"key": …})
+    try {
+      return JSON.parse(
+        raw
+          .replace(/,\s*([}\]])/g, '$1')
+          .replace(/([{,]\s*)([A-Za-z_][A-Za-z0-9_]*)(\s*:)/g, '$1"$2"$3')
+      );
+    } catch (err) {
+      lastErr = err;
+    }
+  }
+  throw lastErr || new Error('Model returned an unexpected response format.');
 }
+
+/** True for failures worth one automatic retry with a stricter prompt. */
+export function isJsonFormatError(err) {
+  if (!err) return false;
+  if (err instanceof SyntaxError) return true;
+  return /unexpected response format|empty response|property name|Unexpected token/i.test(err.message || '');
+}
+
+const JSON_REPAIR_NOTE = '\n\nIMPORTANT: your previous reply was not valid JSON and could not be parsed. Reply again with ONLY the raw JSON value — no prose, no markdown fences, no comments, no trailing commas, double-quoted property names only.';
 
 async function callGemini({ apiKey, model = DEFAULT_MODEL, systemInstruction, prompt, schema }) {
   const contents = [];
