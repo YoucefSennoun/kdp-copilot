@@ -68,6 +68,46 @@
     return el ? (el.textContent || '').trim() : '';
   }
 
+  /**
+   * Rule 7 (v0.8): FBA/Amazon-retail flag. Cards fulfilled by Amazon carry
+   * "Ships from Amazon" / "Sold by Amazon" markers — those are NOT the KDP
+   * self-published competition pool, so they are flagged (not dropped) for
+   * the MyResearchBase cross-check and the FBA-share readout.
+   */
+  function detectFba(cardText) {
+    return /Ships from Amazon|Sold by Amazon|Ships from and sold by Amazon/i.test(cardText || '');
+  }
+
+  /** Rule 3 (v0.8): author line — SERP author links point at field-author. */
+  function extractAuthor(card) {
+    const a = card.querySelector('a[href*="field-author"], a[href*="/author/"]');
+    if (a && a.textContent) {
+      const t = a.textContent.trim().replace(/^by\s+/i, '').slice(0, 80);
+      if (t) return t;
+    }
+    return null;
+  }
+
+  /**
+   * Rule 6 (v0.8): report the live Binding-facet links so the background can
+   * self-calibrate FORMAT_FACET_BIN when Amazon shifts browse-bin IDs.
+   */
+  function getFormatFacets() {
+    const out = {};
+    document.querySelectorAll('a[href*="p_n_feature_nine_browse-bin"], a[href*="p_n_binding_browse-bin"]').forEach((a) => {
+      const label = (a.textContent || '').trim().toLowerCase();
+      const href = a.getAttribute('href') || '';
+      const m = href.match(/p_n_(?:feature_nine|binding)_browse-bin%3A(\d+)|p_n_(?:feature_nine|binding)_browse-bin:(\d+)/i) ||
+        href.match(/(\d{9,})/);
+      const bin = m ? (m[1] || m[2] || m[3]) : null;
+      if (!bin) return;
+      if (/kindle/.test(label)) out.kindle = bin;
+      else if (/paperback/.test(label)) out.paperback = bin;
+      else if (/hardcover/.test(label)) out.hardcover = bin;
+    });
+    return out;
+  }
+
   function getListings() {
     const cards = document.querySelectorAll('div[data-component-type="s-search-result"]');
     const listings = [];
@@ -99,6 +139,7 @@
       listings.push({
         asin,
         title,
+        author: extractAuthor(card),
         price: parseCurrency(priceEl ? priceEl.textContent : null),
         reviewCount: revCountEl ? parseNumber(revCountEl.textContent) || 0 : 0,
         avgRating: ratingEl
@@ -109,7 +150,8 @@
             })()
           : null,
         mediaType: detectMediaType(cardText),
-        sponsored
+        sponsored,
+        fba: detectFba(cardText)
       });
     });
 
@@ -206,7 +248,13 @@
     const verdict = r.verdict || { label: 'No data', tone: 'muted' };
 
     const keywordEl = panel.querySelector('.kdp-keyword');
-    keywordEl.textContent = `${r.keyword || 'Unknown keyword'}${r.market ? ` • ${r.market.toUpperCase()}` : ''}`;
+    // Rule 7 (v0.8.3): 📍 shows the live "Deliver to" location + whether the
+    // market zip pin holds (✓ pinned, ! pin failed, no mark = manual browse).
+    const locActual = m.locationActual || m.locationDesired;
+    const locMark = m.locationPinned === true ? '✓' : (m.locationDesired && m.locationPinned === false ? '!' : '');
+    keywordEl.textContent =
+      `${r.keyword || 'Unknown keyword'}${r.market ? ` • ${r.market.toUpperCase()}` : ''}` +
+      (locActual ? ` • 📍${locActual}${locMark}` : '');
 
     const numEl = panel.querySelector('.kdp-score-num');
     numEl.textContent = r.score == null ? '–' : Math.round(r.score);
@@ -238,6 +286,18 @@
     if (q.all) {
       const el = panel.querySelector('[data-fact="proxy"]');
       if (el) el.textContent = `${el.textContent} ✓✓`;
+    } else if (q.fresh != null || q.bsrOverall != null) {
+      // Rules-v1 gate chips on the live panel.
+      const chips = [
+        q.fresh != null ? (q.fresh ? '✓new' : '✗new') : '',
+        q.bsrOverall != null ? (q.bsrOverall ? '✓bsr' : '✗bsr') : '',
+        q.listings != null ? (q.listings ? '✓list' : '✗list') : '',
+        q.brand != null && q.brand === false ? '✗brand' : ''
+      ].filter(Boolean).join(' ');
+      if (chips) {
+        const el = panel.querySelector('[data-fact="results"]');
+        if (el) el.textContent = `${el.textContent}  ${chips}`;
+      }
     }
 
     const list = panel.querySelector('.kdp-products');
@@ -319,8 +379,153 @@
   }
 
   // ------------------------------------------------------------------
+  // Rule 7 (v0.8.3): automatic delivery-location pin. Amazon ignores the
+  // `zipcode` URL param — the "Deliver to" location lives in session cookies.
+  // For extension-opened tabs (URL carries the market's zip) the script POSTs
+  // Amazon's own address-change endpoint same-origin, then reloads once so
+  // the SERP renders for the pinned location. Manually opened pages (no zip
+  // param) are never touched. Any failure degrades gracefully to scraping
+  // with whatever location the session already has.
+  // ------------------------------------------------------------------
+
+  let locationProof = { desired: null, actual: null, pinned: null };
+
+  function desiredZipFromUrl() {
+    try {
+      const z = new URLSearchParams(location.search).get('zipcode');
+      return z && z.trim() ? z.trim() : null;
+    } catch {
+      return null;
+    }
+  }
+
+  function glowText() {
+    const el = document.querySelector('#glow-ingress-line2') ||
+      document.querySelector('#nav-global-location-slot');
+    return el ? (el.textContent || '').trim() : '';
+  }
+
+  function glowMatches(zip) {
+    const norm = (s) => String(s || '').toLowerCase().replace(/\s+/g, '');
+    const g = norm(glowText());
+    const z = norm(zip);
+    return !!(g && z && g.includes(z));
+  }
+
+  function locationAttemptKey(zip) {
+    return `kdpLoc_${String(zip).toLowerCase().replace(/\s+/g, '')}`;
+  }
+
+  function csrfToken() {
+    try {
+      const modal = document.querySelector('#nav-global-location-data-modal-action');
+      const raw = modal && modal.getAttribute('data-a-modal');
+      if (raw) {
+        const data = JSON.parse(raw);
+        const tok = data && data.ajaxHeaders && data.ajaxHeaders['anti-csrftoken-a2z'];
+        if (tok) return tok;
+      }
+    } catch {
+      // fall through to regex fallbacks
+    }
+    try {
+      const html = document.documentElement ? document.documentElement.innerHTML : '';
+      const m = html.match(/CSRF_TOKEN\s*:\s*"([^"]+)"/) ||
+        html.match(/"anti-csrftoken-a2z"\s*:\s*"([^"]+)"/);
+      if (m) return m[1];
+    } catch {
+      // ignore
+    }
+    try {
+      const input = document.querySelector('#glowValidationToken');
+      if (input && input.value) return input.value;
+    } catch {
+      // ignore
+    }
+    return null;
+  }
+
+  async function pinLocation(zip) {
+    const endpoint = '/gp/delivery/ajax/address-change.html';
+    const body = new URLSearchParams({
+      locationType: 'LOCATION_INPUT',
+      zipCode: zip,
+      storeContext: 'generic',
+      deviceType: 'web',
+      pageType: 'Gateway',
+      actionSource: 'glow'
+    });
+    const headers = {
+      'Content-Type': 'application/x-www-form-urlencoded;charset=UTF-8',
+      'X-Requested-With': 'XMLHttpRequest'
+    };
+    const tok = csrfToken();
+    if (tok) headers['anti-csrftoken-a2z'] = tok;
+    const ctrl = new AbortController();
+    const timer = setTimeout(() => ctrl.abort(), 8000);
+    try {
+      const res = await fetch(endpoint, {
+        method: 'POST',
+        credentials: 'same-origin',
+        headers,
+        body: body.toString(),
+        signal: ctrl.signal
+      });
+      if (!res.ok) return false;
+      const data = await res.json().catch(() => ({}));
+      return !!(data && data.isValidAddress);
+    } catch {
+      return false;
+    } finally {
+      clearTimeout(timer);
+    }
+  }
+
+  /**
+   * Ensure the page renders for the market's zip before scraping. Resolves
+   * with the location proof. Reloads the tab exactly once on a successful
+   * pin (the re-run then sees the glow match and scrapes normally).
+   */
+  async function ensureLocation() {
+    const desired = desiredZipFromUrl();
+    locationProof = { desired, actual: glowText() || null, pinned: null };
+    if (!desired || isBlockedPage()) return locationProof;
+    if (glowMatches(desired)) {
+      locationProof.pinned = true;
+      return locationProof;
+    }
+    // One attempt per tab session — never loop, never fight the user.
+    let attempted = false;
+    try {
+      attempted = window.sessionStorage.getItem(locationAttemptKey(desired)) === '1';
+    } catch {
+      attempted = false;
+    }
+    if (attempted) {
+      locationProof.pinned = false;
+      return locationProof;
+    }
+    try {
+      window.sessionStorage.setItem(locationAttemptKey(desired), '1');
+    } catch {
+      // private mode etc. — still attempt once this run
+    }
+    const ok = await pinLocation(desired);
+    if (ok) {
+      locationProof.pinned = true;
+      location.reload();
+      // Never resolve on this load — the reloaded page scrapes fresh.
+      await new Promise(() => {});
+    }
+    locationProof.pinned = false;
+    return locationProof;
+  }
+
+  // ------------------------------------------------------------------
   // Flow
   // ------------------------------------------------------------------
+
+  let locationReady = null;
 
   async function scrape() {
     const listings = getListings();
@@ -333,6 +538,13 @@
       host.classList.remove('kdp-visible');
     }
 
+    // Wait for the location pin (fast path when already pinned / manual).
+    try {
+      if (locationReady) await locationReady;
+    } catch {
+      // location flow never rejects — defensive only
+    }
+
     const total = getTotalResultsCount();
 
     chrome.runtime.sendMessage({
@@ -343,6 +555,9 @@
         listings,
         totalResultsCount: total.totalResultsCount,
         resultsCountIsApprox: total.resultsCountIsApprox,
+        formatFacets: getFormatFacets(),
+        booksCategory: /\/s[\?\/]/.test(location.pathname) && /[?&]i=stripbooks/.test(location.search),
+        location: { ...locationProof, actual: glowText() || locationProof.actual },
         blocked: isBlockedPage()
       }
     })
@@ -374,6 +589,8 @@
     };
   }
 
+  // Kick off the location pin immediately; scraping waits for it.
+  locationReady = ensureLocation().catch(() => locationProof);
   window.addEventListener('load', scrape);
   scrape();
 })();

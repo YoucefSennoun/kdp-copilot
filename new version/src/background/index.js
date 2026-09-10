@@ -13,7 +13,10 @@ import {
   googleSuggestUrl,
   bestsellersUrl,
   moversUrl,
-  newReleasesUrl
+  newReleasesUrl,
+  setSearchZip,
+  SORT_BESTSELLERS,
+  SORT_NEW_RELEASES
 } from '../lib/markets.js';
 import {
   putKeyword,
@@ -55,11 +58,57 @@ import {
 import { computeDemandProxyScore, deriveSuggestionProxy } from '../lib/proxy.js';
 import { pickDiscoveryNodes } from '../lib/categories.js';
 import { cleanTitleToKeyword } from './discovery.js';
-import { classifyContentType } from '../lib/content-type.js';
+import { classifyContentType, scopeAllows } from '../lib/content-type.js';
+import { computeBrandRisk, matchBlockedBrand, matchFamousAuthor, computeAuthorFrequencyRisk } from '../lib/brands.js';
+import { TRADEMARK_REGISTRIES, buildRegistryLookups } from '../lib/trademark-registry.js';
 
 const DASHBOARD_URL = 'src/dashboard/index.html';
 const ALPHABET = 'abcdefghijklmnopqrstuvwxyz'.split('');
 const CORPUS_CAP_PER_ENGINE = 80;
+const DEFAULT_TRADEMARK_MARKETS = Object.keys(TRADEMARK_REGISTRIES);
+
+// v0.8.1: pause is a persisted user choice, not in-memory state. The service
+// worker can restart at any time (losing everything in memory), which used to
+// silently "unpause" and let the next Amazon page restart the queue.
+const PAUSE_FLAG_KEY = 'kdpPaused';
+let pauseRestored = false;
+
+async function setPausedFlag(paused) {
+  try {
+    await chrome.storage.local.set({ [PAUSE_FLAG_KEY]: !!paused });
+  } catch {
+    // storage unavailable — the in-memory queue state still holds for now.
+  }
+}
+
+async function ensurePauseRestored() {
+  if (pauseRestored) return;
+  pauseRestored = true;
+  try {
+    const stored = await chrome.storage.local.get([PAUSE_FLAG_KEY]);
+    if (stored && stored[PAUSE_FLAG_KEY]) scrapeQueue.stop();
+  } catch {
+    // ignore — queue simply starts unpaused.
+  }
+}
+
+async function isPaused() {
+  await ensurePauseRestored();
+  return scrapeQueue.paused;
+}
+
+// Explicit dashboard/shortcut actions that mean "go": clicking one of these
+// while paused resumes the queue so the requested work actually runs instead
+// of piling up silently behind a pause.
+const EXPLICIT_RESUME_TYPES = new Set([
+  'EXPAND_SEED',
+  'RESEARCH_FORMAT',
+  'SCRAPE_KEYWORD',
+  'SCRAPE_ALL',
+  'DISCOVER_NICHES',
+  'FIND_ME_NICHES',
+  'EXPAND_FROM_SUGGESTIONS'
+]);
 
 // ---------------------------------------------------------------------------
 // Lifecycle
@@ -69,18 +118,27 @@ chrome.runtime.onInstalled.addListener(async () => {
   pruneSuggestions().catch(() => {});
   const settings = await getSettings();
   setupDiscoveryAlarm(settings);
+  ensurePauseRestored();
   console.log('[KDP Copilot] Installed.');
 });
 
 chrome.runtime.onStartup.addListener(async () => {
   const settings = await getSettings();
   setupDiscoveryAlarm(settings);
+  ensurePauseRestored();
 });
 
 chrome.alarms.onAlarm.addListener((alarm) => {
   if (alarm.name === 'kdp-discovery') {
-    runDiscovery({ silent: true })
-      .catch((err) => console.warn('[KDP Copilot] scheduled discovery failed:', err));
+    // A scheduled run must never override the user's pause.
+    isPaused().then((paused) => {
+      if (paused) {
+        console.log('[KDP Copilot] scheduled discovery skipped (queue paused).');
+        return;
+      }
+      runDiscovery({ silent: true })
+        .catch((err) => console.warn('[KDP Copilot] scheduled discovery failed:', err));
+    });
   }
 });
 
@@ -171,13 +229,33 @@ async function _openScrapeTab(task) {
     return await openTab(task.url);
   }
   const market = getMarket(task.market || 'us');
+  // Rules v1 (rule 7): pin the search to the market's capital-city ZIP so
+  // results reflect a realistic domestic delivery location.
+  setSearchZip(market.zipCode || '');
   const params = {};
+  if (task.sort) {
+    params.s = task.sort;
+  }
+  if (task.formatFilter && ['kindle', 'paperback', 'hardcover'].includes(task.formatFilter)) {
+    params.rh = `p_n_feature_nine_browse-bin:${FORMAT_FACET_BIN[task.formatFilter]}`;
+  }
   if (task.scrapedPages && task.scrapedPages > 1) {
     params.page = task.scrapedPages;
   }
   const url = task.url || searchUrl(market.code, task.keyword, params);
   return await openTab(url);
 }
+
+// Rules v1 (rule 6): Amazon format facet binding-node IDs. These are the
+// standard "Binding" browse bins used by the Books search refinements
+// (Kindle = "Kindle Edition", Paperback = "Paperback", Hardcover =
+// "Hardcover"). The SERP parser reports the actual facet links back so we can
+// self-calibrate if Amazon shifts these IDs.
+const FORMAT_FACET_BIN = {
+  kindle: '14260169011',
+  paperback: '14260168011',
+  hardcover: '14260167011'
+};
 
 function openTab(url) {
   return new Promise((resolve, reject) => {
@@ -207,6 +285,18 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
 async function handleMessage(message, sender = {}) {
   const k = (name) => message[name] ?? message.payload?.[name];
 
+  // v0.8.1: the worker may have just restarted (memory wiped) — restore the
+  // user's pause choice before handling anything, so an auto-parsed Amazon
+  // page can never restart a paused queue.
+  await ensurePauseRestored();
+
+  // Explicit user action means "go": resume a paused queue so the requested
+  // Research / Scrape / Discover work actually runs.
+  if (EXPLICIT_RESUME_TYPES.has(message.type) && scrapeQueue.paused) {
+    scrapeQueue.resume();
+    await setPausedFlag(false);
+  }
+
   switch (message.type) {
     // Content-script data in
     case 'SERP_PARSED':
@@ -220,17 +310,18 @@ async function handleMessage(message, sender = {}) {
     case 'GET_KEYWORDS':
       return getAllKeywords();
     case 'GET_KEYWORD':
-      return getKeyword(k('keyword'));
+      return getKeyword(k('keyword'), k('market'));
     case 'DELETE_KEYWORD':
-      return deleteKeyword(k('keyword'));
+      return deleteKeyword(k('keyword'), k('market'));
     case 'PURGE_OUTSIDE_SCOPE': {
       const s = await getSettings();
-      return purgeOutsideScope(s.contentScope || 'strict');
+      return purgeOutsideScope(s.contentScope || 'rule8');
     }
     case 'CLEAR_KEYWORDS':
       return clearKeywords();
     case 'CLEAR_ALL':
       scrapeQueue.abort();
+      await setPausedFlag(false);
       await clearKeywords();
       await clearSuggestions();
       await clearAnalyses();
@@ -252,7 +343,9 @@ async function handleMessage(message, sender = {}) {
 
     // Expansion & scraping
     case 'EXPAND_SEED':
-      return handleExpandSeed(message.seed, message.market);
+      return handleExpandSeed(k('seed'), k('market'));
+    case 'RESEARCH_FORMAT':
+      return handleResearchFormat(k('seed'), k('market'));
     case 'SCRAPE_KEYWORD':
       return scrapeOne(message.payload);
     case 'SCRAPE_ALL':
@@ -269,9 +362,11 @@ async function handleMessage(message, sender = {}) {
       };
     case 'PAUSE_QUEUE':
       scrapeQueue.stop();
+      await setPausedFlag(true);
       return true;
     case 'RESUME_QUEUE':
       scrapeQueue.resume();
+      await setPausedFlag(false);
       return true;
 
     // Discovery Mode (Phase 4) + orchestration (Phase 6)
@@ -292,15 +387,17 @@ async function handleMessage(message, sender = {}) {
 
     // AI actions
     case 'ANALYZE_NICHE':
-      return handleAnalyzeNiche(k('keyword'));
+      return handleAnalyzeNiche(k('keyword'), k('market'));
     case 'GENERATE_LISTING':
-      return handleGenerateListing(k('keyword'), k('niche'));
+      return handleGenerateListing(k('keyword'), k('niche'), k('market'));
     case 'CHECK_TRADEMARK':
-      return handleCheckTrademark(k('keyword'));
+      return handleCheckTrademark(k('keyword'), k('market'), k('markets'));
     case 'GET_ALL_LEGAL':
       return getAllLegals();
     case 'GET_LEGAL':
-      return getLegal(k('keyword'));
+      return getLegal(k('keyword'), k('market'));
+    case 'GET_REGISTRY_LOOKUPS':
+      return buildRegistryLookups(k('keyword'), k('markets'));
 
     // Settings / dashboard
     case 'GET_SETTINGS':
@@ -331,8 +428,18 @@ async function handleMessage(message, sender = {}) {
 function settingsToThresholds(settings) {
   return {
     bsrThreshold: settings.bsrThreshold ?? 200,
-    listingsThreshold: settings.listingsThreshold ?? 1000,
+    subBsrEnabled: settings.subBsrEnabled === true,
+    overallBsrMax: settings.overallBsrMax ?? 200000,
+    overallBsrEnabled: settings.overallBsrEnabled !== false,
+    usListingsMax: settings.usListingsMax ?? 1000,
+    otherListingsMax: settings.otherListingsMax ?? 800,
+    maxBookAgeMonths: settings.maxBookAgeMonths ?? 6,
+    freshHitsMin: settings.freshHitsMin ?? 1,
+    brandFilterEnabled: settings.brandFilterEnabled !== false,
     volumeThreshold: settings.volumeThreshold ?? 50,
+    keywordSuggestedRequired: settings.keywordSuggestedRequired === true,
+    formatFilter: settings.formatFilter ?? null,
+    minFormatShare: settings.minFormatShare ?? 0.5,
     contentTypeEnabled: settings.contentTypeEnabled !== false
   };
 }
@@ -395,11 +502,24 @@ async function handleSerpParsed(payload, sender) {
   );
   const settings = await getSettings();
   const thresholds = settingsToThresholds(settings);
+  // v0.8.1: while paused, a (manually opened) Amazon page is only saved and
+  // scored locally — it must never trigger new tabs or fetches by itself.
+  const paused = scrapeQueue.paused;
 
-  const existing = await getKeyword(keyword).catch(() => null);
+  const existing = await getKeyword(keyword, market.code).catch(() => null);
   const isNew = !existing;
 
-  let metrics = preprocessMetrics(listings, { totalResultsCount, resultsCountIsApprox });
+  // Merge listings from multiple scrapes (e.g. default + bestsellers + new
+  // releases sorts).  Deduplicate by ASIN and cap at 48 to keep metrics
+  // computation tractable.
+  let mergedListings = listings;
+  if (existing && existing.metrics && Array.isArray(existing.sample) && existing.sample.length) {
+    const seen = new Set(existing.sample.map((l) => l && l.asin).filter(Boolean));
+    const newUnique = (listings || []).filter((l) => l && l.asin && !seen.has(l.asin));
+    mergedListings = [...existing.sample, ...newUnique].slice(0, 48);
+  }
+
+  let metrics = preprocessMetrics(mergedListings, { totalResultsCount, resultsCountIsApprox });
 
   // Preserve previously-computed proxy + any partial BSR enrichment.
   if (existing && existing.metrics) {
@@ -407,14 +527,65 @@ async function handleSerpParsed(payload, sender) {
       metrics.demandProxyScore = existing.metrics.demandProxyScore;
       metrics.demandProxyBreakdown = existing.metrics.demandProxyBreakdown;
     }
+    if (existing.metrics.keywordSuggested != null) {
+      metrics.keywordSuggested = existing.metrics.keywordSuggested;
+    }
     if (Array.isArray(existing.metrics.bsrSamples) && existing.metrics.bsrSamples.length) {
       metrics = applyBsrSamples(
         metrics,
         existing.metrics.bsrSamples,
         existing.metrics.bsrExpected ?? metrics.sampleSize
       );
+      // Rules v1 (rule 3): preserve the enriched brand fingerprint + the
+      // blocked-ASIN set across re-scrapes.
+      if (existing.metrics.brandRisk) metrics.brandRisk = existing.metrics.brandRisk;
+      if (Array.isArray(existing.metrics.brandBlockedAsins)) {
+        metrics.brandBlockedAsins = existing.metrics.brandBlockedAsins;
+      }
     }
     if (existing.metrics.bsrExpected != null) metrics.bsrExpected = existing.metrics.bsrExpected;
+  }
+
+  // Rules v1 (rule 3, v0.8): brand-risk fingerprint over the SERP sample
+  // (titles + authors now that the parser extracts author lines). Recomputed
+  // after any preserved enrichment above; enrichment later overwrites with
+  // the deeper title+publisher+author pass.
+  metrics.brandRisk = metrics.brandRisk || computeBrandRisk(metrics.sample || []);
+  if (metrics.brandRisk && metrics.brandRisk.authorBrand) {
+    metrics.authorBrand = metrics.brandRisk.authorBrand;
+  }
+
+  // Rule 7 (v0.8): FBA/Amazon-retail share — "Ships from Amazon" cards are
+  // not the KDP competition pool. Stored for the dashboard readout + the
+  // MyResearchBase cross-check link.
+  const fbaCount = (metrics.sample || []).filter((l) => l && l.fba).length;
+  metrics.fbaCount = fbaCount;
+  metrics.fbaShare = metrics.sample && metrics.sample.length ? fbaCount / metrics.sample.length : 0;
+
+  // Rule 7 (v0.8.3): delivery-location proof reported by the content script
+  // (desired = market zip from the tab URL, actual = live "Deliver to" glow,
+  // pinned = whether they match). Preserved across re-scrapes like the brand
+  // fingerprint below.
+  if (payload.location && typeof payload.location === 'object') {
+    metrics.locationDesired = payload.location.desired || null;
+    metrics.locationActual = payload.location.actual || null;
+    metrics.locationPinned = payload.location.pinned ?? null;
+  } else if (existing && existing.metrics) {
+    if (existing.metrics.locationDesired != null) metrics.locationDesired = existing.metrics.locationDesired;
+    if (existing.metrics.locationActual != null) metrics.locationActual = existing.metrics.locationActual;
+    if (existing.metrics.locationPinned != null) metrics.locationPinned = existing.metrics.locationPinned;
+  }
+
+  // Rule 6 (v0.8): Binding-facet self-calibration — log when Amazon's live
+  // facet bins drift from FORMAT_FACET_BIN so the IDs can be updated.
+  if (payload.formatFacets && Object.keys(payload.formatFacets).length) {
+    const drift = Object.entries(payload.formatFacets).filter(
+      ([fmt, bin]) => FORMAT_FACET_BIN[fmt] && FORMAT_FACET_BIN[fmt] !== String(bin)
+    );
+    if (drift.length) {
+      console.warn('[KDP Copilot] format facet drift detected:', payload.formatFacets);
+    }
+    metrics.formatFacetsSeen = payload.formatFacets;
   }
 
   // Phase 1.5: KDP-publishable content-type classification. Keyword markers
@@ -428,7 +599,7 @@ async function handleSerpParsed(payload, sender) {
     categories: Array.isArray(prev.categories) ? prev.categories : undefined,
     kindleShare: metrics.kindleShare ?? prev.kindleShare ?? null,
     sampleSize: metrics.sampleSize ?? metrics.listingCount ?? sampleTitles.length,
-    scope: settings.contentScope || 'strict'
+    scope: settings.contentScope || 'rule8'
   });
   const ctFinal =
     ct.contentType === 'unknown' && prev.contentType
@@ -447,11 +618,13 @@ async function handleSerpParsed(payload, sender) {
   metrics.requiresExpertise = !!ctFinal.requiresExpertise;
 
   // Interactive single-keyword scrapes get a fresh proxy if none exists yet.
-  if (isNew && metrics.demandProxyScore == null && (scrapeQueue.size + scrapeQueue.pendingTabs.size) < 4) {
+  // Skipped while paused (no background fetching until the user resumes).
+  if (!paused && isNew && metrics.demandProxyScore == null && (scrapeQueue.size + scrapeQueue.pendingTabs.size) < 4) {
     try {
-      const { score, breakdown } = await computeProxyForKeyword(keyword, market.code, settings);
+      const { score, breakdown, keywordSuggested } = await computeProxyForKeyword(keyword, market.code, settings);
       metrics.demandProxyScore = score;
       metrics.demandProxyBreakdown = breakdown;
+      metrics.keywordSuggested = keywordSuggested;
     } catch {
       // optional signal; ignore.
     }
@@ -466,8 +639,8 @@ async function handleSerpParsed(payload, sender) {
     scoredAt: new Date().toISOString()
   };
 
-  const scored = scoreKeyword(keyword, metrics, { longTail: true, thresholds });
-  attachQualifies(scored, thresholds);
+  const scored = scoreKeyword(keyword, metrics, { longTail: true, thresholds, market: market.code });
+  attachQualifies(scored, thresholds, market.code);
   Object.assign(record, {
     score: scored.score,
     demand: scored.demand,
@@ -494,7 +667,8 @@ async function handleSerpParsed(payload, sender) {
   }
 
   // Phase 2: enqueue BSR enrichment only for shortlisted candidates.
-  if (shouldEnrich(record, settings)) {
+  // Never while paused — opening an Amazon page must not open new tabs.
+  if (!paused && shouldEnrich(record, settings)) {
     enqueueEnrichment(record, settings, market.code);
   }
 
@@ -507,12 +681,15 @@ function shouldEnrich(record, settings) {
   if (m.totalResultsCount != null && m.totalResultsCount > (settings.enrichmentCeiling ?? 3000)) {
     return false;
   }
-  if ((record.score ?? 0) < (settings.enrichmentMinScore ?? 50)) return false;
   const seeded = (m.sample || []).filter((l) => l && l.asin);
   if (!seeded.length) return false;
-  const expected = m.bsrExpected ?? 0;
   const have = Array.isArray(m.bsrSamples) ? m.bsrSamples.length : 0;
-  return have < expected || expected === 0;
+  // Always enrich when there are zero BSR samples (no price/min-score gate
+  // for first-time enrichment — the user needs this data to qualify niches).
+  if (have === 0) return true;
+  if ((record.score ?? 0) < (settings.enrichmentMinScore ?? 50)) return false;
+  const expected = m.bsrExpected ?? 0;
+  return have < expected;
 }
 
 function enqueueEnrichment(record, settings, marketCode) {
@@ -541,9 +718,9 @@ function enqueueEnrichment(record, settings, marketCode) {
   scrapeQueue.enqueueMany(tasks);
 }
 
-async function mergeProductIntoParent(parentKeyword, payload) {
+async function mergeProductIntoParent(parentKeyword, payload, marketCode) {
   const settings = await getSettings();
-  const parent = await getKeyword(parentKeyword);
+  const parent = await getKeyword(parentKeyword, marketCode || payload.market);
   if (!parent) return { merged: false, reason: 'parent-missing' };
   const thresholds = settingsToThresholds(settings);
 
@@ -556,12 +733,40 @@ async function mergeProductIntoParent(parentKeyword, payload) {
       bsrCategory: payload.bsrCategory,
       allRanks: Array.isArray(payload.bsrAll) ? payload.bsrAll : [],
       category: payload.category || null,
-      formats: Array.isArray(payload.formats) ? payload.formats : null
+      formats: Array.isArray(payload.formats) ? payload.formats : null,
+      // Rules v1 (rule 1): publication date + publisher/author for the
+      // freshness + brand gates.
+      pubDateEpoch: payload.pubDateEpoch ?? null,
+      pubDate: payload.pubDate || null,
+      publisher: payload.publisher || null,
+      author: payload.author || null,
+      title: payload.title || null
     });
   }
 
   const sampleSize = parent.metrics.bsrExpected ?? parent.metrics.sampleSize ?? 0;
   parent.metrics = applyBsrSamples(parent.metrics, parent.metrics.bsrSamples, sampleSize);
+
+  // Rules v1 (rule 3, v0.8): recompute the brand fingerprint over the
+  // ENRICHED sample (titles + publishers + authors now available). Covers
+  // the static blocklist, famous AUTHOR names, and author-frequency
+  // dominance (one author owning the sample = fame-driven sales).
+  const brandBlockedAsins = new Set();
+  parent.metrics.brandRisk = computeBrandRisk(
+    (parent.metrics.bsrSamples || []).map((s) => ({
+      title: s.title,
+      publisher: s.publisher,
+      author: s.author
+    }))
+  );
+  (parent.metrics.bsrSamples || []).forEach((s) => {
+    const blob = `${s.title || ''} ${s.publisher || ''} ${s.author || ''}`;
+    if (matchBlockedBrand(blob) || matchFamousAuthor(blob)) brandBlockedAsins.add(s.asin);
+  });
+  parent.metrics.brandBlockedAsins = [...brandBlockedAsins];
+  if (parent.metrics.brandRisk && parent.metrics.brandRisk.authorBrand) {
+    parent.metrics.authorBrand = parent.metrics.brandRisk.authorBrand;
+  }
 
   // Phase 1.5: category breadcrumbs from product pages can expose novels and
   // expert non-fiction the keyword/title regexes missed. Escalate to excluded;
@@ -574,7 +779,7 @@ async function mergeProductIntoParent(parentKeyword, payload) {
     )
   );
   if (breadcrumbs.length) {
-    const re = classifyContentType({ keyword: '', categories: breadcrumbs, scope: settings.contentScope || 'strict' });
+    const re = classifyContentType({ keyword: '', categories: breadcrumbs, scope: settings.contentScope || 'rule8' });
     const alreadyExcluded = parent.metrics.contentType === 'high-content-excluded';
     if (!alreadyExcluded && re.contentType === 'high-content-excluded') {
       parent.metrics.contentType = 'high-content-excluded';
@@ -595,8 +800,12 @@ async function mergeProductIntoParent(parentKeyword, payload) {
     }
   }
 
-  const scored = scoreKeyword(parent.keyword, parent.metrics, { longTail: true, thresholds });
-  attachQualifies(scored, thresholds);
+  const scored = scoreKeyword(parent.keyword, parent.metrics, {
+    longTail: true,
+    thresholds,
+    market: parent.market || marketCode || 'us'
+  });
+  attachQualifies(scored, thresholds, parent.market || marketCode);
   Object.assign(parent, {
     score: scored.score,
     demand: scored.demand,
@@ -639,7 +848,7 @@ async function handleProductParsed(payload, sender) {
     const task = scrapeQueue.taskForTab(tabId);
     scrapeQueue.resolveTab(tabId, { kind: 'product', asin: payload.asin });
     if (task && task.type === 'product' && task.parentKeyword) {
-      return mergeProductIntoParent(task.parentKeyword, payload);
+      return mergeProductIntoParent(task.parentKeyword, payload, task.market);
     }
   }
   const keyword = `dp/${payload.asin}`;
@@ -658,42 +867,122 @@ async function handleProductParsed(payload, sender) {
 }
 
 // ---------------------------------------------------------------------------
-// Interest-proxy engine (Phase 3): alphabet-soup autocomplete depth + position
+// Interest-proxy engine (Phase 3 + rules v1 rule 4): bidirectional
+// alphabet-soup autocomplete depth, position weighting, AND the literal
+// "does the keyword itself surface in the search bar" check.
 // ---------------------------------------------------------------------------
+
+/** True when the keyword itself (or a 1-token extension) appears in the
+ *  suggestion lists — hard proof of real Amazon search volume (rule 4). */
+function keywordAppearsInSuggestions(keyword, corpus) {
+  const target = String(keyword || '').toLowerCase().trim();
+  if (!target) return false;
+  const terms = [...(corpus.amazon || []), ...(corpus.google || [])]
+    .map((e) => (e && typeof e === 'object' ? e.term : e))
+    .filter(Boolean)
+    .map((t) => String(t).toLowerCase().trim());
+  if (terms.includes(target)) return true;
+  // 1-word extension counts ("gratitude journal" suggested for "gratitude").
+  const firstWord = target.split(/\s+/)[0];
+  return terms.some((t) => t.startsWith(target + ' ') || (firstWord && t === firstWord + ' ' + target.split(/\s+/).slice(1).join(' ')));
+}
 
 async function computeProxyForKeyword(keyword, marketCode, settings) {
   const corpus = await collectAutocompleteCorpus(keyword, marketCode, settings);
-  return computeDemandProxyScore({ amazon: corpus.amazon, google: corpus.google });
+  const { score, breakdown } = computeDemandProxyScore({ amazon: corpus.amazon, google: corpus.google });
+  return {
+    score,
+    breakdown: { ...breakdown, alphabetProof: corpus.alphabetProof || null },
+    keywordSuggested: keywordAppearsInSuggestions(keyword, corpus)
+  };
 }
 
+/**
+ * Bidirectional alphabet soup (rules v1 rule 4, v0.8 full coverage):
+ * letters AFTER the keyword ("keyword a"…"keyword z") AND letters BEFORE it
+ * ("a keyword"…"z keyword") — the literal rule-4 procedure. The Amazon pass
+ * always runs BOTH directions (search-bar volume is the core rule-4 signal);
+ * Google keeps suffix-full + conditional-prefix to bound traffic. Per-letter
+ * hit sets are returned as `alphabetProof` so the dashboard can show exactly
+ * which a–z extensions shoppers actually type.
+ */
 async function collectAutocompleteCorpus(keyword, marketCode, settings) {
   const amazon = [];
   const google = [];
-  const prefixes = [keyword, ...ALPHABET.map((l) => `${keyword} ${l}`)];
+  const seed = String(keyword || '').trim();
+
+  const suffixPrefixes = [seed, ...ALPHABET.map((l) => `${seed} ${l}`)];
+  const prefixPrefixes = ALPHABET.map((l) => `${l} ${seed}`);
+  const alphabetProof = {
+    suffixLetters: [],
+    prefixLetters: [],
+    suffixHits: 0,
+    prefixHits: 0,
+    keywordSuggested: false
+  };
+
+  const collect = async (prefix, bucket, letter = null, dir = null) => {
+    try {
+      const words = bucket === 'amazon' ? await amazonAutocomplete(prefix, marketCode) : await googleSuggest(prefix, marketCode);
+      const bucketArr = bucket === 'amazon' ? amazon : google;
+      const before = bucketArr.length;
+      words.forEach((w, i) => bucketArr.push({ term: w, position: i + 1 }));
+      // Proof only tracks the Amazon Books search bar (the rule-4 surface).
+      if (bucket === 'amazon' && letter && words.length) {
+        if (dir === 'suffix' && !alphabetProof.suffixLetters.includes(letter)) {
+          alphabetProof.suffixLetters.push(letter);
+          alphabetProof.suffixHits++;
+        }
+        if (dir === 'prefix' && !alphabetProof.prefixLetters.includes(letter)) {
+          alphabetProof.prefixLetters.push(letter);
+          alphabetProof.prefixHits++;
+        }
+      }
+      return bucketArr.length - before;
+    } catch {
+      // keep collecting; failures are expected under rate limiting.
+      return 0;
+    }
+  };
 
   if (settings.autocompleteEnabled !== false) {
-    for (const p of prefixes) {
-      if (amazon.length >= CORPUS_CAP_PER_ENGINE) break;
-      try {
-        const words = await amazonAutocomplete(p, marketCode);
-        words.forEach((w, i) => amazon.push({ term: w, position: i + 1 }));
-      } catch {
-        // keep collecting; failures are expected under rate limiting.
-      }
+    // v0.8.2: probe the bare seed first — a working endpoint virtually always
+    // answers it. Empty twice = dead endpoint for this market/seed: skip the
+    // whole alphabet instead of burning ~50 slow prefixes that yield nothing.
+    const seedHits = await collect(seed, 'amazon', null, null);
+    const amazonAlive = seedHits > 0 || amazon.length > 0;
+    if (!amazonAlive) {
+      console.warn(`[KDP Copilot] Amazon suggest empty for "${seed}" — skipping alphabet soup for this market.`);
+    }
+    for (const p of suffixPrefixes.slice(1)) {
+      if (!amazonAlive || amazon.length >= CORPUS_CAP_PER_ENGINE) break;
+      await collect(p, 'amazon', p.slice(-1), 'suffix');
+    }
+    // Rule 4 prefix pass — FULL a–z on Amazon (v0.8): the rule explicitly
+    // requires testing letters before the keyword too (skipped when the
+    // endpoint proved dead on the seed probe above).
+    for (const p of prefixPrefixes) {
+      if (!amazonAlive || amazon.length >= CORPUS_CAP_PER_ENGINE) break;
+      await collect(p, 'amazon', p[0], 'prefix');
     }
   }
   if (settings.googleSuggestEnabled !== false) {
-    for (const p of prefixes) {
-      if (google.length >= CORPUS_CAP_PER_ENGINE) break;
-      try {
-        const words = await googleSuggest(p, marketCode);
-        words.forEach((w, i) => google.push({ term: w, position: i + 1 }));
-      } catch {
-        // ignore
+    // Same dead-endpoint guard as Amazon (v0.8.2).
+    await collect(seed, 'google');
+    const googleAlive = google.length > 0;
+    for (const p of suffixPrefixes.slice(1)) {
+      if (!googleAlive || google.length >= CORPUS_CAP_PER_ENGINE) break;
+      await collect(p, 'google');
+    }
+    if (googleAlive && google.length < CORPUS_CAP_PER_ENGINE * 0.25) {
+      for (const p of prefixPrefixes.slice(0, 12)) {
+        if (google.length >= CORPUS_CAP_PER_ENGINE) break;
+        await collect(p, 'google');
       }
     }
   }
-  return { amazon, google };
+  alphabetProof.keywordSuggested = keywordAppearsInSuggestions(keyword, { amazon, google });
+  return { amazon, google, alphabetProof };
 }
 
 // ---------------------------------------------------------------------------
@@ -710,9 +999,10 @@ async function handleExpandSeed(seed, marketCode) {
   // One alphabet-soup run serves expansion AND the per-suggestion proxy.
   const corpus = await collectAutocompleteCorpus(seed, market.code, settings).catch(() => ({ amazon: [], google: [] }));
   const seedProxy = computeDemandProxyScore({ amazon: corpus.amazon, google: corpus.google });
+  const seedSuggested = keywordAppearsInSuggestions(seed, { amazon: corpus.amazon, google: corpus.google });
 
-  const allowFiction = settings.allowNicheFiction !== false;
-  const scope = settings.contentScope || 'strict';
+  const allowFiction = settings.allowNicheFiction === true; // rules v1: fiction never allowed in rule8/strict
+  const scope = settings.contentScope || 'rule8';
 
   let suggestions;
   if (apiKey) {
@@ -794,26 +1084,38 @@ async function handleExpandSeed(seed, marketCode) {
       }
     }
     if (!amazon.length && !google.length) return null;
-    return computeDemandProxyScore({ amazon, google }).score;
+    const { score } = computeDemandProxyScore({ amazon, google });
+    return {
+      score,
+      keywordSuggested: keywordAppearsInSuggestions(keyword, { amazon, google })
+    };
   }
 
   const records = [];
   for (const s of candidates) {
     const keyword = String(s.keyword || s || '').trim();
     let demandProxyScore = deriveSuggestionProxy(keyword, corpus, seedProxy.score);
+    let keywordSuggested = keyword === seed ? seedSuggested : null;
     let probed = false;
     if (demandProxyScore == null) {
-      demandProxyScore = await probeSuggestionProxy(keyword, market.code, settings);
+      const probe = await probeSuggestionProxy(keyword, market.code, settings);
       probed = true;
+      if (probe != null) {
+        demandProxyScore = probe.score;
+        keywordSuggested = keywordSuggested ?? probe.keywordSuggested;
+      }
     }
+    if (keywordSuggested == null && keyword === seed) keywordSuggested = seedSuggested;
     const proxyBreakdown = {
       seedProxyScore: seedProxy.score,
       corpusAmazon: corpus.amazon.length,
       corpusGoogle: corpus.google.length,
       crossMatches: seedProxy.breakdown ? seedProxy.breakdown.crossMatches : 0,
-      probed
+      probed,
+      // v0.8: full bidirectional a–z proof from the seed soup (rule 4).
+      alphabetProof: corpus.alphabetProof || null
     };
-    const scored = scoreKeyword(keyword, { demandProxyScore, sampleSize: 0 }, { longTail: true, thresholds });
+    const scored = scoreKeyword(keyword, { demandProxyScore, sampleSize: 0 }, { longTail: true, thresholds, market: market.code });
     const ct = classifyContentType({ keyword, allowFiction, scope });
     records.push({
       keyword,
@@ -827,6 +1129,7 @@ async function handleExpandSeed(seed, marketCode) {
         ...scored.metrics,
         demandProxyScore,
         demandProxyBreakdown: proxyBreakdown,
+        keywordSuggested,
         sampleSize: 0,
         contentType: ct.contentType,
         contentTypeLabel: ct.contentTypeLabel,
@@ -844,7 +1147,7 @@ async function handleExpandSeed(seed, marketCode) {
       confidence: scored.confidence,
       estimatedMonthlySales: null,
       verdict: scored.verdict,
-      qualifies: computeSuggestionQualifies(scored, thresholds, keyword, allowFiction, scope)
+      qualifies: computeSuggestionQualifies(scored, thresholds, keyword, allowFiction, scope, market.code)
     });
   }
 
@@ -874,14 +1177,23 @@ async function handleExpandSeed(seed, marketCode) {
   };
 }
 
-function computeSuggestionQualifies(scored, thresholds, keyword, allowFiction = true, scope = 'strict') {
+function computeSuggestionQualifies(scored, thresholds, keyword, allowFiction = true, scope = 'rule8', market = 'us') {
   const ct = classifyContentType({ keyword: keyword || '', allowFiction, scope });
   const excluded =
     ct.contentType === 'high-content-excluded' || ct.requiresExpertise;
+  const listingsCap = (market || 'us').toLowerCase() === 'us'
+    ? (thresholds.usListingsMax ?? 1000)
+    : (thresholds.otherListingsMax ?? 800);
   return {
     bsr: false,
-    listings: scored.metrics.totalResultsCount != null && scored.metrics.totalResultsCount <= (thresholds.listingsThreshold ?? 1000),
-    volume: scored.metrics.demandProxyScore != null && scored.metrics.demandProxyScore >= (thresholds.volumeThreshold ?? 50),
+    bsrOverall: false,
+    fresh: false,
+    brand: false,
+    format: true,
+    listings: scored.metrics.totalResultsCount != null && scored.metrics.totalResultsCount <= listingsCap,
+    volume: scored.metrics.demandProxyScore != null &&
+      scored.metrics.demandProxyScore >= (thresholds.volumeThreshold ?? 50) &&
+      (!(thresholds.keywordSuggestedRequired === true) || scored.metrics.keywordSuggested === true),
     contentType: (thresholds.contentTypeEnabled === false) ? true : !excluded,
     all: false
   };
@@ -897,11 +1209,25 @@ async function fetchSuggestions({ seed, market }) {
   return { amazon, google };
 }
 
+// v0.8.2: suggest fetches time out instead of hanging a whole Research run
+// when an endpoint is unreachable from the user's network.
+const SUGGEST_TIMEOUT_MS = 8000;
+
+async function fetchWithTimeout(url, options = {}, timeoutMs = SUGGEST_TIMEOUT_MS) {
+  const ctrl = new AbortController();
+  const timer = setTimeout(() => ctrl.abort(), timeoutMs);
+  try {
+    return await fetch(url, { ...options, signal: ctrl.signal });
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
 export async function amazonAutocomplete(seed, marketCode) {
   const market = getMarket(marketCode);
   const url = autocompleteUrl(market.code, seed);
   for (let attempt = 1; attempt <= 2; attempt++) {
-    const res = await fetch(url, {
+    const res = await fetchWithTimeout(url, {
       headers: {
         'User-Agent':
           'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0 Safari/537.36'
@@ -929,7 +1255,7 @@ export async function googleSuggest(seed, marketCode) {
   const market = getMarket(marketCode);
   const url = googleSuggestUrl(seed, market.code);
   for (let attempt = 1; attempt <= 2; attempt++) {
-    const res = await fetch(url, { headers: { 'X-Chrome-UMA-Enabled': '1' } });
+    const res = await fetchWithTimeout(url, { headers: { 'X-Chrome-UMA-Enabled': '1' } });
     if (!res.ok) throw new Error(`Google suggest ${res.status}`);
     let data = [];
     try {
@@ -946,6 +1272,71 @@ export async function googleSuggest(seed, marketCode) {
   return [];
 }
 
+// ---------------------------------------------------------------------------
+// Research: alphabet-soup expansion → scrape → enrich → filter.
+//
+// The user enters a seed keyword (e.g. "logbook").  The extension:
+//   1. Runs alphabet-soup autocomplete (seed a … seed z + a seed … z seed)
+//      to discover every related long-tail phrase Amazon shoppers search for.
+//   2. Scrapes the Amazon SERP for the seed + every discovered phrase.
+//   3. Auto-enriches each hit (product pages → BSR, pub date, brand).
+//   4. The Niche Finder tab shows only keywords passing:
+//        - total results  ≤ 1 000 (US) or ≤ 800 (other markets)
+//        - overall BSR    ≤ 200 000
+//        - not brand-blocked
+//        - KDP-publishable content type
+// ---------------------------------------------------------------------------
+
+async function handleResearchFormat(seed, marketCode) {
+  const settings = await getSettings();
+  const market = getMarket(marketCode || settings.market);
+  const thresholds = settingsToThresholds(settings);
+  const keyword = (seed || '').trim();
+  if (!keyword) throw new Error('Enter a keyword to research.');
+
+  broadcastPipeline('serp', `Researching "${keyword}" — running alphabet-soup expansion…`);
+
+  // ── Step 1: Alphabet-soup autocomplete to discover long-tail phrases ────
+  const corpus = await collectAutocompleteCorpus(keyword, market.code, settings)
+    .catch(() => ({ amazon: [], google: [] }));
+
+  // Extract unique keyword phrases from the autocomplete corpus.
+  const rawPhrases = [...corpus.amazon, ...corpus.google]
+    .map((e) => (e && typeof e === 'object' ? e.term : e))
+    .filter(Boolean)
+    .map((t) => String(t).trim().toLowerCase());
+
+  // Deduplicate: keep the seed itself + every unique autocomplete phrase.
+  const allPhrases = [keyword.toLowerCase(), ...rawPhrases];
+  const uniquePhrases = [...new Set(allPhrases)].filter(Boolean);
+
+  broadcastPipeline('serp', `Found ${uniquePhrases.length} keyword phrases from autocomplete for "${keyword}".`);
+
+  // ── Step 2: Queue SERP scrapes for seed + all discovered phrases ────────
+  const settingsFmt = settings.formatFilter || null;
+  const tasks = uniquePhrases.map((phrase) => ({
+    keyword: phrase,
+    market: market.code,
+    scrapedPages: settings.scrapedPages || 1,
+    formatFilter: settingsFmt
+  }));
+
+  scrapeQueue.enqueueMany(tasks);
+
+  broadcastPipeline('serp', `Queued ${tasks.length} SERP scrapes for "${keyword}" research.`);
+
+  // ── Step 3: Return summary to dashboard ─────────────────────────────────
+  return {
+    keyword,
+    phrasesFound: uniquePhrases.length,
+    tasksQueued: tasks.length,
+    corpus: {
+      amazon: corpus.amazon.length,
+      google: corpus.google.length
+    }
+  };
+}
+
 async function expandFromSuggestions(marketCode) {
   const settings = await getSettings();
   const market = getMarket(marketCode || settings.market);
@@ -960,11 +1351,12 @@ async function expandFromSuggestions(marketCode) {
 
   const records = unique
     .map((s) => {
-      const scored = scoreKeyword(s.keyword, {}, { longTail: true, thresholds });
-      const allowFiction = settings.allowNicheFiction !== false;
-      const scope = settings.contentScope || 'strict';
+      const scored = scoreKeyword(s.keyword, {}, { longTail: true, thresholds, market: market.code });
+      const allowFiction = settings.allowNicheFiction === true;
+      const scope = settings.contentScope || 'rule8';
       const ct = classifyContentType({ keyword: s.keyword, allowFiction, scope });
-      if (ct.contentType === 'high-content-excluded' || (scope === 'strict' && ct.contentType === 'unknown')) return null;
+      if (ct.contentType === 'high-content-excluded' || ct.requiresExpertise) return null;
+      if ((scope === 'strict' || scope === 'rule8') && ct.contentType === 'unknown') return null;
       return {
       keyword: s.keyword,
       market: market.code,
@@ -988,7 +1380,7 @@ async function expandFromSuggestions(marketCode) {
       confidence: scored.confidence,
       estimatedMonthlySales: null,
       verdict: scored.verdict,
-      qualifies: computeSuggestionQualifies(scored, thresholds, s.keyword, settings.allowNicheFiction !== false, settings.contentScope || 'strict')
+      qualifies: computeSuggestionQualifies(scored, thresholds, s.keyword, allowFiction, scope, market.code)
       };
     })
     .filter(Boolean);
@@ -1003,11 +1395,12 @@ async function expandFromSuggestions(marketCode) {
 // ---------------------------------------------------------------------------
 
 async function enqueueScraping(keywords, marketCode) {
-  const { scrapedPages } = await getSettings();
+  const settings = await getSettings();
   const tasks = keywords.map((keyword) => ({
     keyword,
     market: marketCode,
-    scrapedPages: scrapedPages || 1
+    scrapedPages: settings.scrapedPages || 1,
+    formatFilter: settings.formatFilter || null
   }));
   scrapeQueue.enqueueMany(tasks);
 }
@@ -1027,9 +1420,15 @@ async function scrapeAll(filter = {}) {
     if (filter.market && k.market !== filter.market) return false;
     return true;
   });
-  const market = filter.market || (await getSettings()).market;
   if (!unscraped.length) return { count: 0 };
-  enqueueScraping(unscraped.map((k) => k.keyword), market);
+  // v6: keep each record's own market so a mixed-market workspace scrapes
+  // every keyword against the right storefront.
+  const byMarket = {};
+  unscraped.forEach((k) => {
+    const mc = k.market || filter.market || 'us';
+    (byMarket[mc] = byMarket[mc] || []).push(k.keyword);
+  });
+  Object.entries(byMarket).forEach(([mc, keywords]) => enqueueScraping(keywords, mc));
   return { count: unscraped.length };
 }
 
@@ -1051,8 +1450,11 @@ function surfaceDiscoveryNodeCandidates(marketCode, settings) {
   return pickDiscoveryNodes(settings.discoveryCategoryIds)
     .slice(0, count)
     .map((node) => [
-      { url: bestsellersUrl(market.code, node.id), label: 'bestsellers', category: node.name, nodeId: node.id },
-      { url: moversUrl(market.code, node.id), label: 'movers', category: node.name, nodeId: node.id }
+      // Rules v1 (rule 1): new-releases pages surface books published within
+      // the last ~90 days — the natural source for the <6-month freshness rule.
+      { url: newReleasesUrl(market.code, node.id), label: 'new-releases', category: node.name, nodeId: node.id },
+      { url: moversUrl(market.code, node.id), label: 'movers', category: node.name, nodeId: node.id },
+      { url: bestsellersUrl(market.code, node.id), label: 'bestsellers', category: node.name, nodeId: node.id }
     ])
     .flat();
 }
@@ -1107,7 +1509,7 @@ async function runDiscovery({
     return { count: 0, inProgress: true, discovered: [] };
   }
 
-  const candidates = surfaceDiscoveryNodeCandidates(marketCode, settings).slice(0, count * 2);
+  const candidates = surfaceDiscoveryNodeCandidates(marketCode, settings).slice(0, count * 3);
   broadcastPipeline('discovery', `Discovering from ${candidates.length} Amazon category pages…`);
 
   // The worker may already be mid-scrape (e.g. a long-running expansion batch
@@ -1128,8 +1530,9 @@ async function runDiscovery({
   scrapeQueue.enqueueMany(loadDiscoveryNodeTasks(candidates, market.code));
 
   // Wait until every discovery tab has reported and the queue has drained.
+  // (3 sources per node since rules v1: new-releases + movers + bestsellers.)
   const start = Date.now();
-  const timeoutMs = 6 * 60 * 1000;
+  const timeoutMs = 10 * 60 * 1000;
   while (
     scrapeQueue.pendingTabs.size > 0 ||
     scrapeQueue.queue.some((t) => t.type === 'discovery')
@@ -1158,8 +1561,10 @@ async function runDiscovery({
   }
 
   const existing = await getAllKeywords();
-  const existingSet = new Set(existing.map((k) => (k.keyword || '').toLowerCase()));
-  const fresh = keywords.filter((k) => !existingSet.has(k.keyword.toLowerCase()));
+  // v6: dedupe on market+keyword so a niche already tracked in another market
+  // still counts as a fresh discovery here.
+  const existingSet = new Set(existing.map((k) => `${(k.market || 'us')}:${(k.keyword || '').toLowerCase()}`));
+  const fresh = keywords.filter((k) => !existingSet.has(`${market.code}:${k.keyword.toLowerCase()}`));
 
   if (!fresh.length) {
     broadcastPipeline('discovery', 'Discovery found no new keywords (all already present).');
@@ -1184,16 +1589,15 @@ async function runDiscovery({
   }
   const mergedProxy = computeDemandProxyScore({ amazon: corpus.amazon, google: corpus.google });
 
-  // Phase 1.5 / v0.6: drop keywords an indie can't publish before they reach
-  // the batch scraper. In strict scope ONLY blank-interior families qualify.
-  const scope = settings.contentScope || 'strict';
+  // Phase 1.5 / rules v1: drop keywords an indie can't publish before they
+  // reach the batch scraper. rule8 scope keeps low-content + puzzle/coloring/
+  // photography/sheet-music/manual/textbook/children's families.
+  const scope = settings.contentScope || 'rule8';
   const freshWithCt = fresh.map((k) => ({ ...k, ct: classifyContentType({ keyword: k.keyword, scope }) }));
   const publishable =
     thresholds.contentTypeEnabled === false
       ? freshWithCt
-      : scope === 'strict'
-        ? freshWithCt.filter((k) => k.ct.contentType === 'low-content')
-        : freshWithCt.filter((k) => k.ct.contentType !== 'high-content-excluded' && !k.ct.requiresExpertise);
+      : freshWithCt.filter((k) => scopeAllows(k.ct, scope));
   const skipped = freshWithCt.length - publishable.length;
   if (skipped > 0) {
     broadcastPipeline('discovery', `Discovery skipped ${skipped} term(s) outside the ${scope} content scope (non-low-content / expert non-fiction).`);
@@ -1207,7 +1611,7 @@ async function runDiscovery({
   const records = publishable.map((k) => {
     const ctt = k.ct;
     const demandProxyScore = deriveSuggestionProxy(k.keyword, corpus, mergedProxy.score);
-    const scored = scoreKeyword(k.keyword, { demandProxyScore }, { longTail: true, thresholds });
+    const scored = scoreKeyword(k.keyword, { demandProxyScore }, { longTail: true, thresholds, market: market.code });
     return {
       keyword: k.keyword,
       market: market.code,
@@ -1236,7 +1640,7 @@ async function runDiscovery({
       confidence: scored.confidence,
       estimatedMonthlySales: null,
       verdict: scored.verdict,
-      qualifies: computeSuggestionQualifies(scored, thresholds, k.keyword, settings.allowNicheFiction !== false, scope)
+      qualifies: computeSuggestionQualifies(scored, thresholds, k.keyword, settings.allowNicheFiction === true, scope, market.code)
     };
   });
 
@@ -1267,35 +1671,45 @@ function sleep(ms) {
 // AI niche actions
 // ---------------------------------------------------------------------------
 
-async function handleAnalyzeNiche(keyword) {
+async function handleAnalyzeNiche(keyword, market) {
   const apiKey = await getApiKey();
   if (!apiKey) throw new Error('Set a Gemini API key in Settings first.');
 
-  const record = await getKeyword(keyword);
+  const record = await getKeyword(keyword, market);
   if (!record) throw new Error(`No data saved for "${keyword}". Scrape it first.`);
 
   const analysis = await analyzeNiche({ apiKey, keyword, keywordRecord: record });
-  await putAnalysis(keyword, analysis);
+  await putAnalysis(keyword, analysis, record.market || market);
   return analysis;
 }
 
-async function handleCheckTrademark(keyword) {
+async function handleCheckTrademark(keyword, market, markets) {
   const apiKey = await getApiKey();
-  const record = await getKeyword(keyword).catch(() => null);
+  const record = await getKeyword(keyword, market).catch(() => null);
+  const settings = await getSettings();
+  const sweepMarkets = (markets && markets.length
+    ? markets
+    : (Array.isArray(settings.trademarkMarkets) && settings.trademarkMarkets.length
+      ? settings.trademarkMarkets
+      : DEFAULT_TRADEMARK_MARKETS)
+  ).filter((mc) => TRADEMARK_REGISTRIES[mc]);
 
   const scan = apiKey
-    ? await checkTrademark({ apiKey, keyword, keywordRecord: record || {} })
-    : await localTrademarkSweep(keyword, record || {});
+    ? await checkTrademark({ apiKey, keyword, keywordRecord: record || {}, markets: sweepMarkets })
+    : await localTrademarkSweep(keyword, record || {}, sweepMarkets);
 
-  await putLegal(keyword, scan);
+  // Rules v1 (rule 5): attach registry deep links for every market.
+  scan.registryLookups = buildRegistryLookups(keyword, sweepMarkets);
+
+  await putLegal(keyword, scan, record?.market || market);
   return scan;
 }
 
-async function handleGenerateListing(keyword, niche) {
+async function handleGenerateListing(keyword, niche, market) {
   const apiKey = await getApiKey();
   if (!apiKey) throw new Error('Set a Gemini API key in Settings first.');
 
-  const record = await getKeyword(keyword);
+  const record = await getKeyword(keyword, market);
   const listing = await generateListing({
     apiKey,
     niche,

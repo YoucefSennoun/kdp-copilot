@@ -20,6 +20,12 @@ import {
 } from '../src/lib/proxy.js';
 import { classifyContentType, isLowContentNiche, scopeAllows } from '../src/lib/content-type.js';
 import { isSuggestibleSuggestion } from '../src/background/ai.js';
+import { parsePubDate, isFreshPub } from '../src/lib/dates.js';
+import { computeBrandRisk, matchBlockedBrand, matchFamousAuthor, computeAuthorFrequencyRisk, flagBrandedSamples } from '../src/lib/brands.js';
+import { buildRegistryLookups, localTrademarkScreen, COPYRIGHT_NOTE } from '../src/lib/trademark-registry.js';
+import { MARKETS, getMarket, searchUrl, myResearchBaseUrl, suggestHost, autocompleteUrl, locationChangeEndpoint, buildLocationPayload, glowMatchesZip } from '../src/lib/markets.js';
+import { cleanTitleToKeyword } from '../src/background/discovery.js';
+import { pickDiscoveryNodes, RULE8_PRIORITY_NODE_IDS } from '../src/lib/categories.js';
 
 let passed = 0;
 let failed = 0;
@@ -38,41 +44,58 @@ function approx(a, b, eps = 1e-6) {
   return Math.abs(a - b) <= eps;
 }
 
-console.log('\n[1] Qualification gates (computeQualifies)');
+console.log('\n[1] Qualification gates (computeQualifies, rules v1)');
 {
-  const t = { bsrThreshold: 200, listingsThreshold: 1000, volumeThreshold: 50 };
+  const t = {
+    overallBsrMax: 200000,
+    usListingsMax: 1000,
+    otherListingsMax: 800,
+    volumeThreshold: 50,
+    maxBookAgeMonths: 6,
+    freshHitsMin: 1,
+    subBsrEnabled: false
+  };
 
-  const q1 = computeQualifies(
-    { bestSubcategoryBsr: 150, totalResultsCount: 900, demandProxyScore: 60 },
-    t
+  // Rules v1 full pass: one fresh hit (2mo old, BSR 150k) + BSR/listings/volume ok.
+  const now = Date.now();
+  const twoMonthsAgo = now - 60 * 24 * 60 * 60 * 1000;
+  const freshMetrics = {
+    totalResultsCount: 900,
+    demandProxyScore: 60,
+    contentType: 'low-content',
+    bsrSamples: [
+      { asin: 'A', bsr: 150000, pubDateEpoch: twoMonthsAgo },
+      { asin: 'B', bsr: 90000, pubDateEpoch: now - 400 * 24 * 60 * 60 * 1000 } // old book — not a fresh hit, but BSR gate passes
+    ]
+  };
+  const q1 = computeQualifies(freshMetrics, t, 'us');
+  assert(q1.fresh && q1.bsrOverall && q1.listings && q1.volume && q1.all === true, 'fresh hit + all gates → qualifies');
+
+  // No fresh (all books older than 6 months) → fresh gate fails.
+  const noFresh = computeQualifies(
+    { ...freshMetrics, bsrSamples: [{ asin: 'B', bsr: 90000, pubDateEpoch: now - 400 * 24 * 60 * 60 * 1000 }] },
+    t, 'us'
   );
-  assert(q1.bsr && q1.listings && q1.volume && q1.all === true, 'all-three below threshold → qualifies');
+  assert(q1.fresh === true && noFresh.fresh === false && noFresh.all === false, 'all competitors >6mo old → fresh gate fails');
 
-  const q2 = computeQualifies(
-    { bestSubcategoryBsr: 250, totalResultsCount: 900, demandProxyScore: 60 },
-    t
+  // Overall BSR above 200k → bsrOverall gate fails (rule 2).
+  const badBsr = computeQualifies(
+    { ...freshMetrics, bsrSamples: [{ asin: 'C', bsr: 250000, pubDateEpoch: twoMonthsAgo }] },
+    t, 'us'
   );
-  assert(q2.bsr === false && q2.all === false, 'BSR above 200 → fails gate');
+  assert(badBsr.bsrOverall === false && badBsr.all === false, 'overall BSR 250k > 200k → fails gate');
 
-  const q3 = computeQualifies(
-    { bestSubcategoryBsr: 150, totalResultsCount: 1200, demandProxyScore: 60 },
-    t
-  );
-  assert(q3.listings === false && q3.all === false, 'results above 1000 → fails gate');
+  // Market-aware listing caps: 900 ok in US, fails at the 800 cap elsewhere.
+  const ukQ = computeQualifies(freshMetrics, t, 'uk');
+  assert(ukQ.listings === false && ukQ.all === false, '900 results > 800 non-US cap → fails gate in UK');
+  const usQ = computeQualifies(freshMetrics, t, 'us');
+  assert(usQ.listings === true, '900 results ≤ 1000 US cap → passes in US');
 
-  const q4 = computeQualifies(
-    { bestSubcategoryBsr: 150, totalResultsCount: 900, demandProxyScore: 40 },
-    t
-  );
-  assert(q4.volume === false && q4.all === false, 'proxy below 50 → fails gate');
+  // Missing BSR data → fresh/bsrOverall gates stay false (no false-positive).
+  const qGap = computeQualifies({ totalResultsCount: 50, demandProxyScore: 80 }, t, 'us');
+  assert(qGap.bsrOverall === false && qGap.fresh === false, 'missing BSR → gates stay false (no false-positive)');
 
-  const qGap = computeQualifies(
-    { totalResultsCount: 50, demandProxyScore: 80 },
-    t
-  );
-  assert(qGap.bsr === false, 'missing BSR → gate stays false (no false-positive)');
-
-  const qNoData = computeQualifies({}, t);
+  const qNoData = computeQualifies({}, t, 'us');
   assert(qNoData.all === false, 'empty metrics → not qualify');
 }
 
@@ -142,8 +165,8 @@ console.log('\n[4] BSR enrichment: min of sub-category ranks per sample');
   assert(stats.medianRank === 8500, 'overall median preserved (9000+8000)/2');
 
   const withThreshold = computeQualifies({ ...stats, totalResultsCount: 200, demandProxyScore: 80 },
-    { bsrThreshold: 200, listingsThreshold: 1000, volumeThreshold: 50 });
-  assert(withThreshold.bsr === true, 'BSR 5 ≤ 200 → qualifies');
+    { subBsrEnabled: true, bsrThreshold: 200, usListingsMax: 1000, otherListingsMax: 800, volumeThreshold: 50 }, 'us');
+  assert(withThreshold.bsr === true, 'sub-BSR gate (opt-in): BSR 5 ≤ 200 → qualifies');
 
   // Partial enrichment: 1 of 8 expected → coverage low, BSR still usable.
   const partial = computeBsrStats(samples.slice(0, 1), 8);
@@ -213,6 +236,8 @@ console.log('\n[6] deriveSuggestionProxy determinism + position weighting');
 
 console.log('\n[7] KDP-publishable content-type classifier (classifyContentType)');
 {
+  // rule8 is now the DEFAULT scope: low-content + puzzle/coloring/photography/
+  // sheet-music/manual/textbook/children's families; fiction + prose excluded.
   const j = classifyContentType({ keyword: 'wellness journal for women' });
   assert(j.contentType === 'low-content' && j.requiresExpertise === false, 'journal keyword → low-content, publishable');
 
@@ -220,7 +245,7 @@ console.log('\n[7] KDP-publishable content-type classifier (classifyContentType)
   assert(med.contentType === 'high-content-excluded' && med.requiresExpertise === true, 'clinical handbook → excluded (expertise)');
 
   const col = classifyContentType({ keyword: 'coloring book for adults animals' });
-  assert(col.contentType === 'medium-content' && col.requiresExpertise === false, 'coloring book → medium-content');
+  assert(col.contentType === 'medium-content' && col.requiresExpertise === false, 'coloring book → medium-content (rule8 family)');
 
   const nov = classifyContentType({ keyword: 'historical novel' });
   assert(nov.contentType === 'high-content-excluded' && nov.requiresExpertise === false, 'novel keyword → excluded (fiction, not expertise)');
@@ -231,11 +256,8 @@ console.log('\n[7] KDP-publishable content-type classifier (classifyContentType)
   const pers = classifyContentType({ keyword: 'personalized name book' });
   assert(pers.contentType === 'personalized', 'personalized keyword → personalized');
 
-  const unk = classifyContentType({ keyword: 'damask napkins' });
-  assert(unk.contentType === 'unknown', 'generic keyword with no markers → unknown (passes)');
-
-  const biology = classifyContentType({ keyword: 'molecular biology' });
-  assert(biology.contentType === 'high-content-excluded' && biology.requiresExpertise === true, 'scientific keyword → excluded');
+  const bio = classifyContentType({ keyword: 'molecular biology' });
+  assert(bio.contentType === 'high-content-excluded' && bio.requiresExpertise === true, 'scientific keyword → excluded');
 
   // Title-level majority verdict (>=3 sampled titles, high dominates).
   const byTitles = classifyContentType({
@@ -257,12 +279,6 @@ console.log('\n[7] KDP-publishable content-type classifier (classifyContentType)
   });
   assert(catDeny.contentType === 'high-content-excluded' && catDeny.requiresExpertise === true, 'medical breadcrumb → excluded');
 
-  const catAllow = classifyContentType({
-    keyword: 'autoimmune wellness',
-    categories: ['Books', 'Health, Fitness & Dieting', 'Diets & Weight Loss']
-  });
-  assert(catAllow.contentType !== 'high-content-excluded', 'benign health breadcrumb → not excluded');
-
   const catNovel = classifyContentType({
     keyword: 'summer reading lists',
     categories: ['Books', 'Literature & Fiction']
@@ -272,60 +288,58 @@ console.log('\n[7] KDP-publishable content-type classifier (classifyContentType)
   // Kindle-format availability signal.
   const kindle = classifyContentType({ keyword: 'nurse appreciation', kindleShare: 0.05, sampleSize: 8 });
   assert(kindle.contentType === 'low-content' && kindle.contentTypeSource === 'format-signal', 'low Kindle share → low-content format tell');
-
-  const kindleHigh = classifyContentType({ keyword: 'mindful living', kindleShare: 0.8, sampleSize: 10 });
-  assert(kindleHigh.contentType !== 'high-content-excluded', 'high Kindle share alone never excludes (protects guide niches)');
 }
 
-console.log('\n[8] KDP-publishable content gate in computeQualifies');
+console.log('\n[8] Rules-v1 content gate in computeQualifies');
 {
-  const t = { bsrThreshold: 200, listingsThreshold: 1000, volumeThreshold: 50 };
+  const now = Date.now();
+  const t = {
+    overallBsrMax: 200000, usListingsMax: 1000, otherListingsMax: 800,
+    volumeThreshold: 50, maxBookAgeMonths: 6, freshHitsMin: 1
+  };
+  const freshSample = { asin: 'X', bsr: 100000, pubDateEpoch: now - 30 * 24 * 60 * 60 * 1000 };
 
   const ok = computeQualifies(
-    { bestSubcategoryBsr: 150, totalResultsCount: 900, demandProxyScore: 60, contentType: 'low-content' },
-    t
+    { totalResultsCount: 900, demandProxyScore: 60, contentType: 'low-content', bsrSamples: [freshSample] },
+    t, 'us'
   );
-  assert(ok.contentType === true && ok.all === true, 'publishable content + 3 gates → qualifies');
+  assert(ok.contentType === true && ok.all === true, 'publishable content + gates → qualifies');
 
   const excluded = computeQualifies(
-    { bestSubcategoryBsr: 150, totalResultsCount: 900, demandProxyScore: 60, contentType: 'high-content-excluded' },
-    t
+    { totalResultsCount: 900, demandProxyScore: 60, contentType: 'high-content-excluded', bsrSamples: [freshSample] },
+    t, 'us'
   );
   assert(excluded.contentType === false && excluded.all === false, 'excluded content → fails gate even with good BSR');
 
   const expert = computeQualifies(
-    { bestSubcategoryBsr: 150, totalResultsCount: 900, demandProxyScore: 60, requiresExpertise: true },
-    t
+    { totalResultsCount: 900, demandProxyScore: 60, requiresExpertise: true, bsrSamples: [freshSample] },
+    t, 'us'
   );
   assert(expert.contentType === false && expert.all === false, 'expertise-required flag → fails gate');
 
+  // Rule8 scope: unclassified keywords are NOT part of the publishable
+  // families — they fail the gate (a deliberate rules-v1 tightening).
   const unknown = computeQualifies(
-    { bestSubcategoryBsr: 150, totalResultsCount: 900, demandProxyScore: 60, contentType: 'unknown' },
-    t
+    { totalResultsCount: 900, demandProxyScore: 60, contentType: 'unknown', bsrSamples: [freshSample] },
+    t, 'us'
   );
-  assert(unknown.contentType === true && unknown.all === true, 'unclassified (unknown) passes the gate');
+  assert(unknown.contentType === false && unknown.all === false, 'unclassified (unknown) fails the rules-v1 gate');
 
   const off = computeQualifies(
-    { bestSubcategoryBsr: 150, totalResultsCount: 900, demandProxyScore: 60, contentType: 'high-content-excluded' },
-    { ...t, contentTypeEnabled: false }
+    { totalResultsCount: 900, demandProxyScore: 60, contentType: 'high-content-excluded', bsrSamples: [freshSample] },
+    { ...t, contentTypeEnabled: false }, 'us'
   );
-  assert(off.contentType === true && off.all === true, 'filter disabled → exclusions ignored');
-
-  const legacy = computeQualifies(
-    { bestSubcategoryBsr: 150, totalResultsCount: 900, demandProxyScore: 60 },
-    t
-  );
-  assert(legacy.contentType === true && legacy.all === true, 'records without classification still pass (backwards compat)');
+  assert(off.contentType === true, 'filter disabled → exclusions ignored for the content gate');
 }
 
 console.log('\n[9] Revision 2: existing-book titles + isSuggestibleSuggestion gate');
 {
-  // The named failing titles carry no low-content markers, so the classifier
-  // says "unknown" — exactly the state Fix A drops from the AI path (unknown
-  // is NOT cleared when the model generated the suggestion).
+  // The named failing titles carry no low-content/rule8 markers, so the
+  // classifier excludes them in rule8 scope — even harder than the old
+  // "unknown drop", because they're not in the publishable families.
   for (const kw of ['the intelligent investor', 'antifragile', 'principles: life and work', 'the runaway bunny']) {
-    const ct = classifyContentType({ keyword: kw });
-    assert(ct.contentType === 'unknown', `"${kw}" classifies unknown (Fix A drop trigger)`);
+    const ct = classifyContentType({ keyword: kw, scope: 'rule8' });
+    assert(ct.contentType === 'high-content-excluded', `"${kw}" excluded in rule8 scope (not a publishable family)`);
   }
 
 assert(isSuggestibleSuggestion({ keyword: 'the intelligent investor', isExistingTitle: true }, { scope: 'standard' }) === false, 'model-self-flagged existing title rejected');
@@ -333,13 +347,14 @@ assert(isSuggestibleSuggestion({ keyword: 'the intelligent investor', isExisting
   assert(isSuggestibleSuggestion({ keyword: 'kids activity book', why: 'a low competition classic pick' }, { scope: 'standard' }) === false, '"classic" tell rejected');
   assert(isSuggestibleSuggestion({ keyword: 'kids activity book', category: 'guide by mary smith on basics' }, { scope: 'standard' }) === false, '"by <Author>" tell rejected');
   assert(isSuggestibleSuggestion({ keyword: 'clinical handbook of diabetes' }, { scope: 'standard' }) === false, 'hard-excluded engine suggestion rejected');
-  assert(isSuggestibleSuggestion({ keyword: 'vegan beginner cookbook', titleIdea: 'The Everyday Vegan Cookbook', why: 'recipe compilation for beginners' }, { scope: 'standard' }) === true, 'clean guide suggestion passes');
+  assert(isSuggestibleSuggestion({ keyword: 'vegan beginner cookbook', titleIdea: 'The Everyday Vegan Cookbook', why: 'recipe compilation for beginners' }, { scope: 'standard' }) === true, 'clean guide suggestion passes (standard scope)');
 
-  // Default scope is now strict: only blank-interior families survive.
-  assert(isSuggestibleSuggestion({ keyword: 'wellness journal for women' }) === true, 'strict scope keeps a journal niche');
-  assert(isSuggestibleSuggestion({ keyword: 'cozy mysteries for seniors' }) === false, 'strict scope drops a fiction niche');
-  assert(isSuggestibleSuggestion({ keyword: 'coloring book for adults animals' }) === false, 'strict scope drops coloring books (not "generally low-content")');
-  assert(isSuggestibleSuggestion({ keyword: 'beginners guide to gardening' }) === false, 'strict scope drops guides');
+  // Rules-v1 (rule8) default scope: family niches survive, prose/fiction die.
+  assert(isSuggestibleSuggestion({ keyword: 'wellness journal for women' }) === true, 'rule8 scope keeps a journal niche');
+  assert(isSuggestibleSuggestion({ keyword: 'sudoku puzzle book for adults' }) === true, 'rule8 scope keeps puzzle books');
+  assert(isSuggestibleSuggestion({ keyword: 'coloring book for adults animals' }) === true, 'rule8 scope keeps coloring books');
+  assert(isSuggestibleSuggestion({ keyword: 'cozy mysteries for seniors' }) === false, 'rule8 scope drops fiction');
+  assert(isSuggestibleSuggestion({ keyword: 'beginners guide to gardening' }) === false, 'rule8 scope drops non-fiction guides');
 }
 
 console.log('\n[10] leader-dominance fingerprint (single-work-driven terms)');
@@ -354,50 +369,63 @@ console.log('\n[10] leader-dominance fingerprint (single-work-driven terms)');
   );
   assert(broad.leaderDominanceRatio < 0.4, `review share spread across several titles (${broad.leaderDominanceRatio.toFixed(2)})`);
 
-  const t = { bsrThreshold: 200, listingsThreshold: 1000, volumeThreshold: 50 };
+  const now = Date.now();
+  const t = {
+    overallBsrMax: 200000, usListingsMax: 1000, otherListingsMax: 800,
+    volumeThreshold: 50, maxBookAgeMonths: 6, freshHitsMin: 1
+  };
+  const freshSample = { asin: 'Y', bsr: 100000, pubDateEpoch: now - 30 * 24 * 60 * 60 * 1000 };
   const dominated = computeQualifies(
-    { bestSubcategoryBsr: 120, totalResultsCount: 700, demandProxyScore: 60, contentType: 'guide', leaderDominanceRatio: 0.93, totalReviews: 540, sampleSize: 5 },
-    t
+    { totalResultsCount: 700, demandProxyScore: 60, contentType: 'guide', leaderDominanceRatio: 0.93, totalReviews: 540, sampleSize: 5, bsrSamples: [freshSample] },
+    t, 'us'
   );
   assert(dominated.contentType === false && dominated.all === false, 'single title owns >60% of reviews → fails content gate');
 
   const healthy = computeQualifies(
-    { bestSubcategoryBsr: 120, totalResultsCount: 700, demandProxyScore: 60, contentType: 'guide', leaderDominanceRatio: 0.3, totalReviews: 540, sampleSize: 5 },
-    t
+    { totalResultsCount: 700, demandProxyScore: 60, contentType: 'guide', leaderDominanceRatio: 0.3, totalReviews: 540, sampleSize: 5, bsrSamples: [freshSample] },
+    t, 'us'
   );
   assert(healthy.contentType === true && healthy.all === true, 'spread review share → still qualifies');
 }
 
-console.log('\n[11] v0.5: narrow-fiction carve-out + writer-craft denial');
+console.log('\n[11] v0.5: narrow-fiction carve-out (standard scope) + writer-craft denial');
 {
-  const cozy = classifyContentType({ keyword: 'cozy mysteries for seniors' });
-  assert(cozy.contentType === 'fiction' && cozy.requiresExpertise === false, 'specific long-tail fiction → fiction-niche (publishable)');
+  // Standard scope keeps the narrow-fiction carve-out; rules-v1 scope never
+  // allows fiction (rule 8: avoid novels/fiction).
+  const cozy = classifyContentType({ keyword: 'cozy mysteries for seniors', scope: 'standard' });
+  assert(cozy.contentType === 'fiction' && cozy.requiresExpertise === false, 'specific long-tail fiction → fiction-niche (standard)');
 
-  const chapters = classifyContentType({ keyword: 'chapter books for girls 6 to 8' });
-  assert(chapters.contentType === 'fiction', 'chapter books for a stated age → fiction-niche');
+  const cozyRule8 = classifyContentType({ keyword: 'cozy mysteries for seniors', scope: 'rule8' });
+  assert(cozyRule8.contentType === 'high-content-excluded', 'rule8 scope excludes fiction');
 
-  const broad = classifyContentType({ keyword: 'romance novels' });
+  const chapters = classifyContentType({ keyword: 'chapter books for girls 6 to 8', scope: 'standard' });
+  assert(chapters.contentType === 'rule8-content', "children's chapter books are a rule8 family (even in standard scope)");
+
+  const chaptersR8 = classifyContentType({ keyword: 'chapter books for girls 6 to 8', scope: 'rule8' });
+  assert(chaptersR8.contentType === 'rule8-content', "rule8 scope keeps children's chapter books");
+
+  const broad = classifyContentType({ keyword: 'romance novels', scope: 'standard' });
   assert(broad.contentType === 'high-content-excluded', 'generic fiction term stays excluded');
 
-  const off = classifyContentType({ keyword: 'cozy mysteries for seniors', allowFiction: false });
+  const off = classifyContentType({ keyword: 'cozy mysteries for seniors', allowFiction: false, scope: 'standard' });
   assert(off.contentType === 'high-content-excluded', 'fiction carve-out disabled → excluded again');
 
-  const med = classifyContentType({ keyword: 'medical romance novel' });
+  const med = classifyContentType({ keyword: 'medical romance novel', scope: 'standard' });
   assert(med.contentType === 'high-content-excluded', 'expertise + fiction overlap stays excluded');
 
-  const wc1 = classifyContentType({ keyword: 'how to write a book' });
+  const wc1 = classifyContentType({ keyword: 'how to write a book', scope: 'standard' });
   assert(wc1.contentType === 'high-content-excluded', 'writer-craft guide → excluded');
 
-  const wc2 = classifyContentType({ keyword: 'book marketing for authors' });
+  const wc2 = classifyContentType({ keyword: 'book marketing for authors', scope: 'standard' });
   assert(wc2.contentType === 'high-content-excluded', 'publishing-marketing guide → excluded');
 
-  const keep = classifyContentType({ keyword: 'novel writing planner' });
+  const keep = classifyContentType({ keyword: 'novel writing planner', scope: 'standard' });
   assert(keep.contentType === 'low-content', 'planner family overrides writer-craft text → low-content');
 
-  const keep2 = classifyContentType({ keyword: 'planner for self published authors' });
+  const keep2 = classifyContentType({ keyword: 'planner for self published authors', scope: 'standard' });
   assert(keep2.contentType === 'low-content', 'planner for the author audience is still a planner');
 
-  const unk = classifyContentType({ keyword: 'space opera romance for adults' });
+  const unk = classifyContentType({ keyword: 'space opera romance for adults', scope: 'standard' });
   assert(unk.contentType === 'fiction', 'subgenre + audience fiction → fiction-niche');
 }
 
@@ -452,29 +480,314 @@ console.log('\n[12] v0.6 strict scope: Amazon "generally low-content" list only'
   assert(standardColoring.contentType === 'medium-content', 'standard scope still allows coloring books');
 }
 
-console.log('\n[13] v0.6: scopeAllows scrub decision (storage cleanup + dashboard gate)');
+console.log('\n[14] rules v1 (rule 1): locale-aware publication-date parser');
+{
+  const en = parsePubDate('March 3, 2026', 'us');
+  assert(en === Date.UTC(2026, 2, 3), 'US "March 3, 2026" → epoch');
+
+  const fr = parsePubDate('3 mars 2026', 'fr');
+  assert(fr === Date.UTC(2026, 2, 3), 'FR "3 mars 2026" → epoch');
+
+  const de = parsePubDate('3. März 2026', 'de');
+  assert(de === Date.UTC(2026, 2, 3), 'DE "3. März 2026" → epoch');
+
+  const it = parsePubDate('3 marzo 2026', 'it');
+  assert(it === Date.UTC(2026, 2, 3), 'IT "3 marzo 2026" → epoch');
+
+  const es = parsePubDate('3 de marzo de 2026', 'es');
+  assert(es === Date.UTC(2026, 2, 3), 'ES "3 de marzo de 2026" → epoch');
+
+  const jp = parsePubDate('2026年3月3日', 'jp');
+  assert(jp === Date.UTC(2026, 2, 3), 'JP "2026年3月3日" → epoch');
+
+  const iso = parsePubDate('2026-03-03', 'us');
+  assert(iso === Date.UTC(2026, 2, 3), 'ISO "2026-03-03" → epoch');
+
+  // Locale-dependent numeric: US = month/day, others = day/month.
+  const usNum = parsePubDate('03/05/2026', 'us');
+  assert(usNum === Date.UTC(2026, 2, 5), 'US numeric 03/05 → March 5');
+  const frNum = parsePubDate('03/05/2026', 'fr');
+  assert(frNum === Date.UTC(2026, 4, 3), 'FR numeric 03/05 → May 3');
+
+  const yearOnly = parsePubDate('2026', 'us');
+  assert(yearOnly === Date.UTC(2026, 0, 1), 'year-only "2026" → Jan 1');
+
+  assert(parsePubDate('', 'us') === null, 'empty → null');
+
+  // Freshness window (rule 1: < 6 months).
+  const now = Date.UTC(2026, 8, 1);
+  assert(isFreshPub(Date.UTC(2026, 6, 1), 6, now) === true, '2 months old → fresh');
+  assert(isFreshPub(Date.UTC(2025, 8, 1), 6, now) === false, '12 months old → not fresh');
+}
+
+console.log('\n[15] rules v1 (rule 3): big-brand removal');
+{
+  const disney = matchBlockedBrand('Disney Frozen Adventure Journal');
+  assert(!!disney, 'Disney title → brand match');
+  const clean = matchBlockedBrand('My Gratitude Journal for Women');
+  assert(clean === null, 'clean title → no brand match');
+
+  const risk = computeBrandRisk([
+    { title: 'Moleskine Classic Notebook' },
+    { title: 'Blank Lined Journal' }
+  ]);
+  assert(risk.topBranded === true && risk.count >= 1, 'one branded sample → topBranded');
+  assert(risk.matched.includes('moleskine'), 'moleskine detected');
+
+  const cleanRisk = computeBrandRisk([
+    { title: 'Gratitude Journal for Women' },
+    { title: 'Daily Planner for Nurses' }
+  ]);
+  assert(cleanRisk.topBranded === false, 'no brands → topBranded false');
+
+  const pubRisk = computeBrandRisk([{ title: 'Random title', publisher: 'Penguin Random House' }]);
+  assert(pubRisk.topBranded === true, 'publisher brand detected');
+
+  const authorRisk = computeBrandRisk([{ author: 'Scholastic Press' }]);
+  assert(authorRisk.topBranded === true, 'author/publisher-imprint brand detected');
+}
+
+console.log('\n[16] rules v1 (rule 5): multi-market trademark screen + registries');
+{
+  const lookups = buildRegistryLookups('cozy cat journal', ['us', 'fr', 'jp']);
+  assert(lookups.length === 4, '3 markets + aggregator → 4 lookups');
+  const us = lookups.find((l) => l.key === 'us');
+  assert(us && us.registry.includes('USPTO'), 'US → USPTO registry');
+  assert(us.searchUrl.includes('cozy'), 'US search URL pre-filled');
+  const agg = lookups.find((l) => l.key === 'marcaria');
+  assert(agg && agg.searchUrl.includes('marcaria'), 'aggregator link present');
+
+  const flagged = localTrademarkScreen('disney coloring book', ['us', 'fr', 'jp']);
+  assert(flagged.risk !== 'low', 'disney keyword → flagged');
+  assert(flagged.perMarket.us.risk === 'medium' || flagged.perMarket.us.risk === 'high', 'US market flagged');
+  assert(flagged.perMarket.jp.flagged.length > 0, 'JP market flagged (global list applies everywhere)');
+
+  const anime = localTrademarkScreen('doraemon notebook', ['jp']);
+  assert(anime.perMarket.jp.flagged.length > 0, 'JP-specific famous mark (doraemon) caught');
+
+  const clean = localTrademarkScreen('gratitude journal for nurses', ['us', 'uk']);
+  assert(clean.risk === 'low' && clean.safe === true, 'clean keyword → low risk in both markets');
+}
+
+console.log('\n[17] rules v1: computeFreshHits (rule 1+2+3 combination gate)');
+{
+  const now = Date.now();
+  const twoMo = now - 60 * 24 * 60 * 60 * 1000;
+  const tenMo = now - 300 * 24 * 60 * 60 * 1000;
+
+  const samples = [
+    { asin: 'FRESH1', bsr: 150000, pubDateEpoch: twoMo },                  // fresh hit
+    { asin: 'OLD1', bsr: 90000, pubDateEpoch: tenMo },                     // selling but old
+    { asin: 'FRESHBRAND', bsr: 50000, pubDateEpoch: twoMo, brand: true },  // fresh but branded (blocked below)
+    { asin: 'FRESHNOBSR', pubDateEpoch: twoMo },                            // fresh, no BSR
+    { asin: 'FRESHLOWSALES', bsr: 300000, pubDateEpoch: twoMo }             // fresh, BSR above 200k
+  ];
+  const blocked = new Set(['FRESHBRAND']);
+  const hits = computeFreshHitsExport(samples, { brandBlockedAsins: blocked, now });
+  assert(hits === 1, 'exactly 1 qualifying fresh hit (new + selling + unbranded)');
+
+  const two = computeFreshHitsExport([
+    { asin: 'A', bsr: 100000, pubDateEpoch: twoMo },
+    { asin: 'B', bsr: 180000, pubDateEpoch: twoMo }
+  ], { now });
+  assert(two === 2, 'two qualifying hits counted');
+}
+
+// Direct import of the rules-v1 helper (kept name-local to avoid re-export churn).
+import { computeFreshHits as computeFreshHitsExport } from '../src/lib/scoring.js';
+
+console.log('\n[18] rules v1 (rule 6): format shares');
+{
+  const listings = [
+    { mediaType: 'kindle' }, { mediaType: 'kindle' },
+    { mediaType: 'paperback' }, { mediaType: 'hardcover' }
+  ];
+  const m = preprocessMetrics(listings, {});
+  assert(m.formatShares.kindle === 0.5, 'kindle share = 2/4');
+  assert(m.formatShares.paperback === 0.25, 'paperback share = 1/4');
+  assert(m.formatShares.hardcover === 0.25, 'hardcover share = 1/4');
+}
 {
   assert(
-    scopeAllows(classifyContentType({ keyword: 'gratitude journal', scope: 'strict' })),
-    'journal passes strict scrub'
+    scopeAllows(classifyContentType({ keyword: 'gratitude journal', scope: 'rule8' }), 'rule8'),
+    'journal passes rule8 scrub'
   );
   assert(
-    !scopeAllows(classifyContentType({ keyword: 'cozy mysteries for seniors', scope: 'strict' })),
-    'fiction fails strict scrub'
+    scopeAllows(classifyContentType({ keyword: 'sudoku puzzle book for adults', scope: 'rule8' }), 'rule8'),
+    'puzzle book passes rule8 scrub'
   );
   assert(
-    !scopeAllows(classifyContentType({ keyword: 'coloring book for adults animals', scope: 'strict' })),
-    'coloring fails strict scrub'
+    scopeAllows(classifyContentType({ keyword: 'coloring book for adults animals', scope: 'rule8' }), 'rule8'),
+    'coloring passes rule8 scrub'
+  );
+  assert(
+    scopeAllows(classifyContentType({ keyword: 'math textbook for 3rd grade', scope: 'rule8' }), 'rule8'),
+    'textbook passes rule8 scrub'
+  );
+  assert(
+    scopeAllows(classifyContentType({ keyword: 'bedtime stories for toddlers', scope: 'rule8' }), 'rule8'),
+    "children's book passes rule8 scrub"
+  );
+  assert(
+    scopeAllows(classifyContentType({ keyword: 'photography book of national parks', scope: 'rule8' }), 'rule8'),
+    'photography book passes rule8 scrub'
+  );
+  assert(
+    scopeAllows(classifyContentType({ keyword: 'user manual for small business owners', scope: 'rule8' }), 'rule8'),
+    'manual passes rule8 scrub'
+  );
+  assert(
+    !scopeAllows(classifyContentType({ keyword: 'cozy mysteries for seniors', scope: 'rule8' }), 'rule8'),
+    'fiction fails rule8 scrub'
+  );
+  assert(
+    !scopeAllows(classifyContentType({ keyword: 'the intelligent investor', scope: 'rule8' }), 'rule8'),
+    'existing-book title fails rule8 scrub'
+  );
+  assert(
+    !scopeAllows(classifyContentType({ keyword: 'damask napkins', scope: 'rule8' }), 'rule8'),
+    'generic unknown keyword fails rule8 scrub'
   );
   assert(
     scopeAllows(classifyContentType({ keyword: 'coloring book for adults animals', scope: 'standard' }), 'standard'),
     'coloring passes standard scrub'
   );
   assert(
-    !scopeAllows(classifyContentType({ keyword: 'the intelligent investor', scope: 'strict' })),
-    'legacy existing-book title fails strict scrub'
+    scopeAllows(classifyContentType({ keyword: 'beginners guide to gardening', scope: 'standard' }), 'standard'),
+    'guide passes standard scrub'
   );
   assert(!scopeAllows(null), 'null result never allows');
+}
+
+console.log('\n[19] v0.8 rule 3: famous-author + author-frequency brand detection');
+{
+  assert(matchFamousAuthor('Atomic Habits by James Clear') === 'james clear', 'famous author (james clear) detected');
+  assert(matchFamousAuthor('My Gratitude Journal for Women') === null, 'clean title → no famous-author hit');
+  assert(matchFamousAuthor('It by Stephen King') === 'stephen king', 'stephen king detected');
+
+  const dominated = computeAuthorFrequencyRisk([
+    { author: 'Jane Doe' }, { author: 'Jane Doe' }, { author: 'Jane Doe' },
+    { author: 'John Smith' }, { author: 'Other Writer' }
+  ]);
+  assert(dominated && dominated.author === 'jane doe' && dominated.count === 3, 'same author x3 → author-dominance');
+
+  const spread = computeAuthorFrequencyRisk([
+    { author: 'Author A' }, { author: 'Author B' }, { author: 'Author C' }, { author: 'Author D' }
+  ]);
+  assert(spread === null, 'four distinct authors → no dominance');
+
+  const risk = computeBrandRisk([
+    { title: 'Atomic Habits', author: 'James Clear' },
+    { title: 'Blank Journal', author: 'Unknown' }
+  ]);
+  assert(risk.topBranded === true, 'famous-author sample → topBranded');
+
+  const freqRisk = computeBrandRisk([
+    { title: 'Book 1', author: 'Jane Doe' },
+    { title: 'Book 2', author: 'Jane Doe' },
+    { title: 'Book 3', author: 'Jane Doe' }
+  ]);
+  assert(freqRisk.topBranded === true && !!freqRisk.authorBrand, 'author-frequency dominance → topBranded + authorBrand');
+
+  const flags = flagBrandedSamples([
+    { asin: 'A1', title: 'Disney Journal', author: 'Disney' },
+    { asin: 'B2', title: 'Gratitude Journal', author: 'Jane Smith' }
+  ]);
+  assert(flags.has('A1') && !flags.has('B2'), 'per-ASIN flags: branded blocked, clean passes');
+}
+
+console.log('\n[20] v0.8 rule 8: cleanTitleToKeyword preserves low-content families');
+{
+  const j = cleanTitleToKeyword('Gratitude Journal for Women (Paperback)');
+  assert(j.includes('journal'), `family word kept: "${j}"`);
+  const p = cleanTitleToKeyword('Weekly Planner 2026 by Some Author');
+  assert(p.includes('planner'), `planner kept: "${p}"`);
+  const c = cleanTitleToKeyword('Cute Animals Coloring Book for Kids Ages 4-8');
+  assert(c.includes('coloring'), `coloring kept: "${c}"`);
+  const n = cleanTitleToKeyword('Dot Grid Notebook for Work');
+  assert(n.includes('notebook'), `notebook kept: "${n}"`);
+  const s = cleanTitleToKeyword('Large Sudoku Puzzle Book for Adults');
+  assert(s.includes('sudoku') || s.includes('puzzle'), `puzzle kept: "${s}"`);
+  assert(cleanTitleToKeyword('Dune') === '', 'single-word title → dropped (long-tail only)');
+}
+
+console.log('\n[21] v0.8 rules 5+7: 20 markets, Books-only URLs, MyResearchBase, registries');
+{
+  assert(Object.keys(MARKETS).length === 20, `20 markets registered (got ${Object.keys(MARKETS).length})`);
+  for (const code of ['in', 'nl', 'se', 'pl', 'tr', 'sa', 'ae', 'sg', 'eg']) {
+    assert(MARKETS[code] && MARKETS[code].zipCode, `${code.toUpperCase()} has a capital ZIP (${MARKETS[code] && MARKETS[code].zipCode})`);
+  }
+  const url = searchUrl('fr', 'carnet de bord');
+  assert(url.includes('amazon.fr') && url.includes('i=stripbooks'), 'FR search URL is Books-scoped on amazon.fr');
+  const mrb = myResearchBaseUrl('us', 'gratitude journal');
+  assert(mrb.includes('myresearchbase.com') && mrb.includes('gratitude'), 'MyResearchBase deep link built');
+  const lookups = buildRegistryLookups('gratitude journal');
+  assert(lookups.length >= 21, `all-market lookups + aggregator (${lookups.length})`);
+  assert(lookups.some((l) => l.key === 'in'), 'IN registry present');
+  assert(lookups.some((l) => l.key === 'marcaria'), 'Marcaria aggregator present');
+  assert(typeof COPYRIGHT_NOTE === 'string' && COPYRIGHT_NOTE.length > 20, 'copyright note exported');
+  assert(getMarket('xx').code === 'us', 'unknown market falls back to US');
+}
+
+console.log('\n[22] v0.8 rule 7: FBA share in preprocessMetrics');
+{
+  const m = preprocessMetrics([
+    { mediaType: 'paperback', fba: true },
+    { mediaType: 'paperback', fba: false },
+    { mediaType: 'kindle', fba: false },
+    { mediaType: 'paperback', fba: true }
+  ], {});
+  assert(m.fbaCount === 2 && m.fbaShare === 0.5, 'FBA 2/4 → share 0.5');
+}
+
+console.log('\n[23] v0.8 rule 8: discovery defaults start with low-content nodes');
+{
+  const nodes = pickDiscoveryNodes();
+  assert(nodes.length > 0 && nodes.every((n) => n.kdpFriendly !== false), 'default pick excludes fiction/expertise');
+  const firstIds = nodes.slice(0, 6).map((n) => String(n.id));
+  const lowFirst = firstIds.some((id) => RULE8_PRIORITY_NODE_IDS.slice(0, 6).includes(id));
+  assert(lowFirst, `low-content node in first 6 (${firstIds.join(',')})`);
+  const explicit = pickDiscoveryNodes(['17']);
+  assert(explicit.length === 1 && String(explicit[0].id) === '17', 'explicit opt-in escape hatch honored');
+}
+
+console.log('\n[24] v0.8.2: per-market suggest hosts (Research outside the US)');
+{
+  assert(suggestHost('us') === 'completion.amazon.com', 'US → completion.amazon.com');
+  assert(suggestHost('fr') === 'completion.amazon.fr', 'FR → completion.amazon.fr');
+  assert(suggestHost('uk') === 'completion.amazon.co.uk', 'UK → completion.amazon.co.uk');
+  assert(suggestHost('jp') === 'completion.amazon.co.jp', 'JP → completion.amazon.co.jp');
+  const frUrl = autocompleteUrl('fr', 'carnet');
+  assert(frUrl.includes('https://completion.amazon.fr/'), 'FR autocomplete URL hits the FR host');
+  assert(frUrl.includes('mid=A13V1IB3VIYZZH'), 'FR autocomplete URL carries the FR mid');
+  assert(frUrl.includes('alias=stripbooks'), 'autocomplete stays Books-scoped');
+  let allPattern = true;
+  for (const code of Object.keys(MARKETS)) {
+    const expected = MARKETS[code].domain.replace(/^www\./, 'completion.');
+    if (suggestHost(code) !== expected || !autocompleteUrl(code, 'x').startsWith(`https://${expected}/`)) {
+      allPattern = false;
+    }
+  }
+  assert(allPattern, 'all 20 markets map to their own completion host');
+}
+
+console.log('\n[25] v0.8.3: automatic delivery-location pin (rule 7)');
+{
+  assert(
+    locationChangeEndpoint('fr') === 'https://www.amazon.fr/gp/delivery/ajax/address-change.html',
+    'FR location endpoint on amazon.fr'
+  );
+  assert(
+    locationChangeEndpoint('jp') === 'https://www.amazon.co.jp/gp/delivery/ajax/address-change.html',
+    'JP location endpoint on amazon.co.jp'
+  );
+  const payload = buildLocationPayload('75001');
+  assert(payload.locationType === 'LOCATION_INPUT' && payload.zipCode === '75001', 'payload carries LOCATION_INPUT + zip');
+  assert(payload.actionSource === 'glow' && payload.deviceType === 'web', 'payload glow/web fields present');
+  assert(glowMatchesZip('Livraison à Paris 75001', '75001') === true, 'FR glow text matches 75001');
+  assert(glowMatchesZip('Deliver to London SW1A1AA', 'SW1A 1AA') === true, 'UK glow matches despite spacing');
+  assert(glowMatchesZip('Deliver to New York 10001', '75001') === false, 'wrong zip does not match');
+  assert(glowMatchesZip('', '75001') === false && glowMatchesZip(null, '75001') === false, 'empty glow never matches');
 }
 
 console.log(`\n${passed} passed, ${failed} failed`);

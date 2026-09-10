@@ -1,18 +1,30 @@
 const DB_NAME = 'kdp-copilot';
-const DB_VERSION = 5;
+const DB_VERSION = 6;
 
 import { classifyContentType, scopeAllows } from './content-type.js';
 
 const STORES = {
-  keywords: { keyPath: 'keyword' },
+  keywords: { keyPath: 'id' },            // v6: id = "{market}:{keyword}"
   suggestions: { keyPath: 'id' },
-  analyses: { keyPath: 'keyword' },
-  legals: { keyPath: 'keyword' },
+  analyses: { keyPath: 'id' },            // v6: id = "{market}:{keyword}"
+  legals: { keyPath: 'id' },             // v6: id = "{market}:{keyword}"
   scrapes: { keyPath: 'id', autoIncrement: true },
   discoveries: { keyPath: 'id', autoIncrement: true }
 };
 
 let dbPromise = null;
+
+/** Canonical record id: market-qualified so the same keyword can be researched
+ *  in multiple marketplaces without clobbering (rules v1, B1 fix). */
+export function keywordId(keyword, market = 'us') {
+  const m = (market || 'us').toLowerCase();
+  return `${m}:${String(keyword || '').trim()}`;
+}
+
+function migrateLegacyRecord(storeName, rec) {
+  if (!rec || rec.id) return rec;
+  return { ...rec, id: keywordId(rec.keyword, rec.market) };
+}
 
 export function openDB() {
   if (dbPromise) return dbPromise;
@@ -22,10 +34,50 @@ export function openDB() {
 
     request.onupgradeneeded = (event) => {
       const db = event.target.result;
+      const tx = event.target.transaction;
+
+      // Create any missing store with its FINAL schema.
       Object.entries(STORES).forEach(([name, opts]) => {
         if (!db.objectStoreNames.contains(name)) {
           db.createObjectStore(name, { ...opts });
         }
+      });
+
+      // --- v6 migration: keyword-keyed stores → id-keyed, one transaction ---
+      // A store's keyPath cannot be changed in place, so for each legacy store
+      // (keyPath 'keyword') we: create a temp id-keyed store, cursor-copy the
+      // records with their new market-qualified id, and when the cursor
+      // drains, delete the old store and rename the temp into place. All
+      // inside this same versionchange transaction — the captured `tmp`
+      // store reference stays valid across the rename.
+      const LEGACY = { keywords: 'keywords_v6', analyses: 'analyses_v6', legals: 'legals_v6' };
+      Object.entries(LEGACY).forEach(([name, tmpName]) => {
+        const oldStore =
+          db.objectStoreNames.contains(name) && !db.objectStoreNames.contains(tmpName)
+            ? tx.objectStore(name)
+            : null;
+        if (!oldStore) return;
+        if (!oldStore.keyPath || oldStore.keyPath === 'id') return;
+
+        const tmp = db.createObjectStore(tmpName, { keyPath: 'id' });
+        const cursorReq = oldStore.openCursor();
+        cursorReq.onsuccess = () => {
+          const cursor = cursorReq.result;
+          if (cursor) {
+            const migrated = migrateLegacyRecord(name, cursor.value);
+            if (migrated && migrated.id) tmp.put(migrated);
+            cursor.continue();
+          } else {
+            // Cursor drained: swap the temp store into the final name.
+            db.deleteObjectStore(name);
+            tmp.name = name;
+          }
+        };
+        cursorReq.onerror = () => {
+          // Migration failed: keep the legacy store readable rather than
+          // aborting the whole upgrade.
+          console.warn('[KDP Copilot] record migration for', name, 'failed:', cursorReq.error);
+        };
       });
     };
 
@@ -58,18 +110,32 @@ async function withTx(storeName, mode, fn) {
   });
 }
 
-// ---- Keywords ----
+// ---- Keywords (v6: market-qualified id) ----
 
 export async function putKeyword(record) {
+  if (!record.id) record.id = keywordId(record.keyword, record.market);
   return withStore('keywords', 'readwrite', (store) => store.put(record));
 }
 
 export async function putKeywords(records) {
-  return withTx('keywords', 'readwrite', (store) => records.forEach((r) => store.put(r)));
+  return withTx('keywords', 'readwrite', (store) =>
+    records.forEach((r) => {
+      if (!r.id) r.id = keywordId(r.keyword, r.market);
+      store.put(r);
+    })
+  );
 }
 
-export async function getKeyword(keyword) {
-  return withStore('keywords', 'readonly', (store) => store.get(keyword));
+/** v6: get by (keyword, market). A bare keyword with no market falls back to
+ *  the legacy single-record lookup first (any market), then to 'us'. */
+export async function getKeyword(keyword, market) {
+  const direct = await withStore('keywords', 'readonly', (store) =>
+    store.get(keywordId(keyword, market || 'us'))
+  );
+  if (direct) return direct;
+  if (market) return null;
+  const all = await getAllKeywords();
+  return all.find((k) => k.keyword === keyword) || null;
 }
 
 export async function getAllKeywords() {
@@ -81,27 +147,31 @@ export async function getKeywordsByMarket(marketCode) {
   return all.filter((k) => k.market === marketCode);
 }
 
-export async function deleteKeyword(keyword) {
-  return withTx('keywords', 'readwrite', (store) => store.delete(keyword));
+export async function deleteKeyword(keyword, market) {
+  return withTx('keywords', 'readwrite', (store) =>
+    store.delete(keywordId(keyword, market || 'us'))
+  );
 }
 
 export async function clearKeywords() {
   return withTx('keywords', 'readwrite', (store) => store.clear());
 }
 
-// Physical cleanup: delete every stored keyword that fails the given content
-// scope. 'strict' keeps only Amazon "generally low-content" families; the
-// standard scope keeps anything not explicitly high-content-excluded.
-export async function purgeOutsideScope(scope = 'strict') {
+/** Delete every stored keyword that fails the given content scope.
+ *  'strict' keeps only Amazon "generally low-content" families;
+ *  'rule8' keeps those plus puzzle/coloring/photography/sheet-music/manual/
+ *  textbook/children's (the rules-v1 "Not Generally Low-Content" list);
+ *  'standard' keeps anything not explicitly high-content-excluded. */
+export async function purgeOutsideScope(scope = 'rule8') {
   const all = await getAllKeywords();
   const doomed = [];
   for (const rec of all) {
     if ((rec.keyword || '').startsWith('dp/')) continue;
     const ct = classifyContentType({ keyword: rec.keyword || '', scope });
     const ok = scopeAllows(ct, scope);
-    if (!ok) doomed.push(rec.keyword);
+    if (!ok) doomed.push(rec.id);
   }
-  for (const keyword of doomed) await deleteKeyword(keyword);
+  for (const id of doomed) await withTx('keywords', 'readwrite', (store) => store.delete(id));
   return { removed: doomed.length, scanned: all.length };
 }
 
@@ -148,32 +218,34 @@ export async function pruneSuggestions() {
   return stale.length;
 }
 
-// ---- AI analyses ----
+// ---- AI analyses (v6: market-qualified id) ----
 
-export async function putAnalysis(keyword, analysis) {
+export async function putAnalysis(keyword, analysis, market) {
+  const id = keywordId(keyword, market || analysis?.market || 'us');
   return withStore('analyses', 'readwrite', (store) =>
-    store.put({ keyword, analyzedAt: Date.now(), ...analysis })
+    store.put({ id, keyword, market: market || analysis?.market || 'us', analyzedAt: Date.now(), ...analysis })
   );
 }
 
-export async function getAnalysis(keyword) {
-  return withStore('analyses', 'readonly', (store) => store.get(keyword));
+export async function getAnalysis(keyword, market) {
+  return withStore('analyses', 'readonly', (store) => store.get(keywordId(keyword, market || 'us')));
 }
 
 export async function clearAnalyses() {
   return withTx('analyses', 'readwrite', (store) => store.clear());
 }
 
-// ---- Trademark / copyright screens ----
+// ---- Trademark / copyright screens (v6: market-qualified id) ----
 
-export async function putLegal(keyword, legal) {
+export async function putLegal(keyword, legal, market) {
+  const id = keywordId(keyword, market || legal?.market || 'us');
   return withStore('legals', 'readwrite', (store) =>
-    store.put({ keyword, checkedAt: Date.now(), ...legal })
+    store.put({ id, keyword, market: market || legal?.market || 'us', checkedAt: Date.now(), ...legal })
   );
 }
 
-export async function getLegal(keyword) {
-  return withStore('legals', 'readonly', (store) => store.get(keyword));
+export async function getLegal(keyword, market) {
+  return withStore('legals', 'readonly', (store) => store.get(keywordId(keyword, market || 'us')));
 }
 
 export async function getAllLegals() {
@@ -214,7 +286,7 @@ export async function clearDiscoveryRuns() {
   return withTx('discoveries', 'readwrite', (store) => store.clear());
 }
 
-// ---- Settings ----
+// ---- Settings (rules v1) ----
 
 export const DEFAULT_SETTINGS = {
   apiKey: '',
@@ -224,17 +296,34 @@ export const DEFAULT_SETTINGS = {
   googleSuggestEnabled: true,
   scrapedPages: 1,
   panelVisible: true,
+  panelEnabled: true,
   panelAutoAnalyze: false,
 
-  // Niche qualification thresholds (§3 / Phase 5)
-  bsrThreshold: 200,            // best sub-category BSR must be <= this
-  listingsThreshold: 1000,      // true Amazon total result count must be <= this
-  volumeThreshold: 50,          // demandProxyScore (0-100) must be >= this
-  contentTypeEnabled: true,     // KDP-publishable content filter (Phase 1.5)
-  contentScope: 'strict',       // 'strict' = Amazon "generally low-content" only (blank interiors); 'standard' = + coloring/puzzle/workbook/guides (v0.6)
-  allowNicheFiction: false,     // specific long-tail fiction niches — only relevant in 'standard' scope
+  // Niche qualification thresholds — rules v1 (§ rules for niche research.txt)
+  bsrThreshold: 200,            // optional ADVANCED gate: best sub-category BSR (default OFF via subBsrEnabled)
+  subBsrEnabled: false,         // v0.7: overall-BSR rule replaces sub-category gate by default
+  overallBsrMax: 200000,        // rule 2: overall Books BSR must be <= this (default ON)
+  overallBsrEnabled: true,
+  usListingsMax: 1000,          // rule 1: US market result-count cap
+  otherListingsMax: 800,        // rule 1: every non-US market result-count cap
+  maxBookAgeMonths: 6,          // rule 1: competitor books must be newer than this
+  freshHitsMin: 1,              // rule 1+2: min # of new (<=6mo) AND selling (BSR<=200k) AND unbranded competitors
+  brandFilterEnabled: true,     // rule 3: exclude niches whose sample carries a big-brand book
+  volumeThreshold: 50,          // rule 4: interest proxy (0-100) must be >= this
+  keywordSuggestedRequired: false, // rule 4 (strict mode): keyword itself must appear in autocomplete
+  contentTypeEnabled: true,     // KDP-publishable content filter
+  contentScope: 'rule8',        // 'rule8' = Low-Content + Not-Generally-Low-Content (rules v1); legacy: 'strict' | 'standard'
+  allowNicheFiction: false,     // narrow fiction niches — only relevant in 'standard' scope
 
-  // BSR enrichment pipeline (Phase 2)
+  // Format filter (rule 6): null = all formats; 'kindle' | 'paperback' | 'hardcover'
+  formatFilter: null,
+  minFormatShare: 0.5,
+
+  // Trademark sweep markets (rule 5, v0.8): default = every marketplace
+  // registry (20 storefronts + Marcaria aggregator attached to each report).
+  trademarkMarkets: ['us', 'uk', 'fr', 'de', 'it', 'es', 'ca', 'jp', 'au', 'mx', 'br', 'in', 'nl', 'se', 'pl', 'tr', 'sa', 'ae', 'sg', 'eg'],
+
+  // BSR enrichment pipeline
   enrichmentEnabled: true,
   enrichmentSampleSize: 8,      // top N listings visited per shortlisted keyword
   enrichmentMinScore: 50,       // only keywords scoring >= this get enriched
@@ -255,6 +344,13 @@ export async function getSettings() {
       // Drop deprecated model IDs saved by older builds.
       if (/^gemini-[12]\.\d/.test(merged.model || '')) {
         merged.model = DEFAULT_SETTINGS.model;
+      }
+      // Normalize legacy scope values: v0.6 'strict' upgrades to the rules-v1
+      // 'rule8' scope unless the user explicitly re-saves a legacy choice.
+      if (merged.contentScope === 'strict') merged.contentScope = 'rule8';
+      // Normalize formatFilter.
+      if (!['kindle', 'paperback', 'hardcover'].includes(merged.formatFilter)) {
+        merged.formatFilter = null;
       }
       resolve(merged);
     });

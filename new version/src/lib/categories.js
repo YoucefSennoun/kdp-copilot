@@ -64,6 +64,20 @@ export const DISCOVERY_CATEGORIES = [
   { id: '2062', name: "Children's Crafts", tier: 'niche' },
   { id: '2072', name: 'Children\'s Games', tier: 'niche' },
 
+  // --- Rules v1 (rule 8): "Not Generally Low-Content" families ---
+  { id: '2020', name: 'Photography', tier: 'niche' },
+  { id: '5211', name: 'Puzzles', tier: 'niche' },
+  { id: '5210', name: 'Board Games', tier: 'niche' },
+  { id: '5207', name: 'Hobbies, Games & Puzzles (Top)', tier: 'top' },
+  { id: '227137', name: 'Music', tier: 'niche' },
+  { id: '11015', name: 'Songbooks, Musicals & Songwriting', tier: 'niche' },
+  { id: '4653', name: 'Children\'s Composition Creative Writing (Textbook)', tier: 'niche' },
+  { id: '10605', name: 'School & Education Textbooks', tier: 'niche' },
+  { id: '468226', name: 'How-to & Home Improvements (Manuals)', tier: 'niche' },
+  { id: '4718', name: 'Do-It-Yourself (Manuals)', tier: 'niche' },
+  { id: '536180', name: 'Children\'s Game Books', tier: 'niche' },
+  { id: '4', name: "Children's Books (Top, rule8)", tier: 'top' },
+
   // --- Journals, planners & notebooks (low-content) ---
   { id: '134564', name: 'Journals & Notebooks', tier: 'niche' },
   { id: '134561', name: 'Planners & Personal Organizers', tier: 'niche' },
@@ -202,6 +216,25 @@ export function discoveryCategoryById(id) {
   return DISCOVERY_CATEGORIES.find((c) => String(c.id) === String(id)) || null;
 }
 
+/**
+ * Rule 8 (v0.8): default discovery order — Low-Content families FIRST, then
+ * the "Not Generally Low-Content" families (puzzle, coloring, photography,
+ * sheet music, manuals, textbooks, children's), then everything else. The
+ * auto-discover run walks this order, so the first keywords it surfaces are
+ * always blank-interior / activity niches an indie can actually produce.
+ */
+export const RULE8_PRIORITY_NODE_IDS = [
+  // Low-Content first: journals, planners, notebooks, diaries, logs/trackers
+  '134564', '134561', '134563', '134562', '8975355011', '8975360011',
+  // Not Generally Low-Content: puzzles, games, coloring, activity
+  '5211', '5210', '536180', '2851', '2665', '2072', '2062',
+  // Crafting templates / scrapbook
+  '4089', '3382',
+  // Photography / sheet music / manuals / textbooks / children's
+  '2020', '227137', '11015', '468226', '4718', '4653', '10605', '4',
+  '6132', '3003', '3005', '3007', '3299', '3307'
+];
+
 export function pickDiscoveryNodes(ids) {
   if (Array.isArray(ids) && ids.length) {
     // Explicit selection = opt-in escape hatch; honor it verbatim.
@@ -210,8 +243,14 @@ export function pickDiscoveryNodes(ids) {
       .map((id) => byId.get(String(id)))
       .filter(Boolean);
   }
-  // Default pick: only KDP-publishable nodes (fiction/expertise excluded).
-  return DISCOVERY_CATEGORIES.filter((c) => c.kdpFriendly !== false && c.tier === 'niche').concat(
-    DISCOVERY_CATEGORIES.filter((c) => c.kdpFriendly !== false && c.tier === 'top')
+  // Default pick: only KDP-publishable nodes (fiction/expertise excluded),
+  // ordered Low-Content first per RULE8_PRIORITY_NODE_IDS (rule 8).
+  const eligible = DISCOVERY_CATEGORIES.filter((c) => c.kdpFriendly !== false);
+  const rank = new Map(RULE8_PRIORITY_NODE_IDS.map((id, i) => [String(id), i]));
+  const niche = eligible.filter((c) => c.tier === 'niche').sort((a, b) =>
+    (rank.has(String(a.id)) ? rank.get(String(a.id)) : 1e6) -
+    (rank.has(String(b.id)) ? rank.get(String(b.id)) : 1e6)
   );
+  const top = eligible.filter((c) => c.tier === 'top');
+  return niche.concat(top);
 }

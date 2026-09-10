@@ -39,8 +39,8 @@ function renderTable(list) {
         <td class="score-badge">${fmt.score(s.score)}</td>
         <td class="muted">${fmt.datetime(s.collectedAt || s.timestamp || s.createdAt)}</td>
         <td>
-          <a href="#" class="suggest-expand" data-keyword="${escapeHtml(s.keyword)}">Expand</a> ·
-          <a href="#" class="suggest-scrape" data-keyword="${escapeHtml(s.keyword)}">Scrape</a>
+          <a href="#" class="suggest-expand" data-keyword="${escapeHtml(s.keyword)}" data-market="${escapeHtml(s.market || 'us')}">Expand</a> ·
+          <a href="#" class="suggest-scrape" data-keyword="${escapeHtml(s.keyword)}" data-market="${escapeHtml(s.market || 'us')}">Scrape</a>
         </td>
       </tr>`
     )
@@ -49,7 +49,8 @@ function renderTable(list) {
   body.querySelectorAll('.suggest-expand').forEach((a) =>
     a.addEventListener('click', async (e) => {
       e.preventDefault();
-      await send('EXPAND_SEED', { seed: a.dataset.keyword, market: (await settings()).market });
+      const market = (a.dataset.market || (await settings()).market || 'us');
+      await send('EXPAND_SEED', { seed: a.dataset.keyword, market });
       showStatus($('suggest-status'), `Expanded "${a.dataset.keyword}" and queued scraping.`);
       refresh();
     })
@@ -57,7 +58,8 @@ function renderTable(list) {
   body.querySelectorAll('.suggest-scrape').forEach((a) =>
     a.addEventListener('click', async (e) => {
       e.preventDefault();
-      await send('SCRAPE_KEYWORD', { keyword: a.dataset.keyword, market: (await settings()).market });
+      const market = (a.dataset.market || (await settings()).market || 'us');
+      await send('SCRAPE_KEYWORD', { keyword: a.dataset.keyword, market });
       showStatus($('suggest-status'), `Queued scrape for "${a.dataset.keyword}".`);
     })
   );

@@ -7,6 +7,107 @@
 
   const asin = m[1];
 
+  // Marketplace code from the hostname — needed to parse the locale-formatted
+  // "Publication date" (rules v1, rule 1).
+  const MARKET_BY_HOST = {
+    'www.amazon.com': 'us',
+    'www.amazon.co.uk': 'uk',
+    'www.amazon.de': 'de',
+    'www.amazon.fr': 'fr',
+    'www.amazon.it': 'it',
+    'www.amazon.es': 'es',
+    'www.amazon.ca': 'ca',
+    'www.amazon.co.jp': 'jp',
+    'www.amazon.com.au': 'au',
+    'www.amazon.com.mx': 'mx',
+    'www.amazon.com.br': 'br',
+    'www.amazon.in': 'in',
+    'www.amazon.nl': 'nl',
+    'www.amazon.se': 'se',
+    'www.amazon.pl': 'pl',
+    'www.amazon.com.tr': 'tr',
+    'www.amazon.sa': 'sa',
+    'www.amazon.ae': 'ae',
+    'www.amazon.sg': 'sg',
+    'www.amazon.eg': 'eg'
+  };
+
+  function marketCode() {
+    return MARKET_BY_HOST[location.hostname] || 'us';
+  }
+
+  // Month names for every marketplace language (rules v1, rule 1: pub dates
+  // render in the market's locale, and Date.parse fails on most of them).
+  const MONTHS = {
+    en: ['january', 'february', 'march', 'april', 'may', 'june', 'july',
+      'august', 'september', 'october', 'november', 'december'],
+    de: ['januar', 'februar', 'märz', 'maerz', 'april', 'mai', 'juni', 'juli',
+      'august', 'september', 'oktober', 'november', 'dezember'],
+    fr: ['janvier', 'février', 'fevrier', 'mars', 'avril', 'mai', 'juin',
+      'juillet', 'août', 'aout', 'septembre', 'octobre', 'novembre', 'décembre', 'decembre'],
+    it: ['gennaio', 'febbraio', 'marzo', 'aprile', 'maggio', 'giugno', 'luglio',
+      'agosto', 'settembre', 'ottobre', 'novembre', 'dicembre'],
+    es: ['enero', 'febrero', 'marzo', 'abril', 'mayo', 'junio', 'julio',
+      'agosto', 'septiembre', 'setiembre', 'octubre', 'noviembre', 'diciembre'],
+    pt: ['janeiro', 'fevereiro', 'março', 'marco', 'abril', 'maio', 'junho', 'julho',
+      'agosto', 'setembro', 'septembro', 'outubro', 'novembro', 'dezembro'],
+    ja: ['1月', '2月', '3月', '4月', '5月', '6月', '7月', '8月', '9月', '10月', '11月', '12月']
+  };
+  const MARKET_LANG = {
+    us: 'en', uk: 'en', ca: 'en', au: 'en',
+    de: 'de', fr: 'fr', it: 'it', es: 'es', mx: 'es',
+    jp: 'ja', br: 'pt'
+  };
+
+  function epochUtc(y, mo, d) {
+    if (mo < 1 || mo > 12 || d < 1 || d > 31) return null;
+    return Date.UTC(y, mo - 1, d);
+  }
+
+  function monthIndexForToken(token) {
+    const t = String(token || '').toLowerCase().replace(/\./g, '');
+    for (const lang of Object.keys(MONTHS)) {
+      const idx = MONTHS[lang].indexOf(t);
+      if (idx !== -1) return idx;
+    }
+    return null;
+  }
+
+  function parsePubDate(text, market) {
+    const raw = String(text || '').trim();
+    if (!raw) return null;
+
+    const iso = raw.match(/(\d{4})-(\d{1,2})-(\d{1,2})/);
+    if (iso) return epochUtc(+iso[1], +iso[2], +iso[3]);
+
+    const jp = raw.match(/(\d{4})年\s*(\d{1,2})月\s*(\d{1,2})日/);
+    if (jp) return epochUtc(+jp[1], +jp[2], +jp[3]);
+
+    const monthName =
+      raw.match(/([A-Za-zÀ-ÿ]+)\.?\s*(\d{1,2})\s*(?:st|nd|rd|th)?\s*,?\s*(\d{4})/) ||
+      raw.match(/(\d{1,2})\s*\.?\s*([A-Za-zÀ-ÿ]+)\.?\s*(\d{4})/);
+    if (monthName) {
+      const token = /^\d/.test(monthName[1]) ? monthName[2] : monthName[1];
+      const day = /^\d/.test(monthName[1]) ? +monthName[1] : +monthName[2];
+      const year = +monthName[3];
+      const idx = monthIndexForToken(token);
+      if (idx != null) return epochUtc(year, idx + 1, day);
+    }
+
+    const num = raw.match(/(\d{1,2})[/.](\d{1,2})[/.](\d{4})/);
+    if (num) {
+      const a = +num[1], b = +num[2], y = +num[3];
+      const monthFirst = ['us', 'ca', 'au'].includes((market || '').toLowerCase());
+      return epochUtc(y, monthFirst ? a : b, monthFirst ? b : a);
+    }
+
+    const yearOnly = raw.match(/^(\d{4})$/);
+    if (yearOnly) return epochUtc(+yearOnly[1], 1, 1);
+
+    const native = Date.parse(raw);
+    return Number.isNaN(native) ? null : native;
+  }
+
   function parseCurrency(text) {
     const match = (text || '').match(/[\d,]+(\.\d+)?/);
     return match ? parseFloat(match[0].replace(/,/g, '')) : null;
@@ -121,6 +222,7 @@
 
   const bsr = getBsr();
   const pub = getPublicationData();
+  const market = marketCode();
 
   const payload = {
     asin,
@@ -135,6 +237,8 @@
     category: getCategoryBreadcrumb(),
     url: location.href,
     blocked: isBlockedPage(),
+    market,
+    pubDateEpoch: parsePubDate(pub.pubDate, market),
     ...pub
   };
 

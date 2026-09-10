@@ -238,49 +238,120 @@ export function verdict(score) {
 }
 
 /**
- * §3 qualification contract. All gates (including the KDP-publishable
- * content-type gate) must be true for qualifies.all. Thresholds come from
- * Settings, not hardcoded.
+ * Rules-v1 helper: count "fresh hits" — competitor samples that are BOTH
+ * recently published (rule 1: <= maxBookAgeMonths) AND already selling
+ * (rule 2: overall Books BSR <= overallBsrMax), excluding big-brand books
+ * (rule 3) when the brand filter is on. This is the literal rules-1+2+3
+ * combination: a niche qualifies when at least freshHitsMin such books exist.
  */
-export function computeQualifies(metrics = {}, thresholds = {}) {
+export function computeFreshHits(bsrSamples = [], { maxBookAgeMonths = 6, overallBsrMax = 200000, brandBlockedAsins = new Set(), now = Date.now() } = {}) {
+  const fresh = (bsrSamples || []).filter((s) => {
+    if (!s || s.bsr == null) return false;
+    if (brandBlockedAsins.has(s.asin)) return false;
+    if (s.pubDateEpoch == null) return false;
+    const cutoff = now - maxBookAgeMonths * 30.44 * 24 * 60 * 60 * 1000;
+    return s.pubDateEpoch >= cutoff && s.bsr <= overallBsrMax;
+  });
+  return fresh.length;
+}
+
+/**
+ * Rules-v1 rule engine. Extends the v0.6 contract with:
+ *   fresh      — >= freshHitsMin new (<=6mo), selling (BSR<=200k), unbranded competitors
+ *   bsrOverall — min overall Books BSR among enriched samples <= overallBsrMax (rule 2)
+ *   listings   — market-aware result-count cap: US 1000 / others 800 (rule 1)
+ *   brand      — no big-brand book in the enriched sample (rule 3)
+ *   format     — when a format filter is active, that format's share >= min (rule 6)
+ * plus the legacy volume (interest proxy, rule 4) and contentType gates.
+ * `market` must be passed for the US-vs-other listing cap.
+ */
+export function computeQualifies(metrics = {}, thresholds = {}, market = 'us') {
   const bsrThreshold = thresholds.bsrThreshold ?? 200;
-  const listingsThreshold = thresholds.listingsThreshold ?? 1000;
+  const subBsrEnabled = thresholds.subBsrEnabled === true;
+  const overallBsrMax = thresholds.overallBsrMax ?? 200000;
+  const overallBsrEnabled = thresholds.overallBsrEnabled !== false;
+  const usListingsMax = thresholds.usListingsMax ?? 1000;
+  const otherListingsMax = thresholds.otherListingsMax ?? 800;
   const volumeThreshold = thresholds.volumeThreshold ?? 50;
   const contentTypeEnabled = thresholds.contentTypeEnabled !== false;
+  const maxBookAgeMonths = thresholds.maxBookAgeMonths ?? 6;
+  const freshHitsMin = thresholds.freshHitsMin ?? 1;
+  const brandFilterEnabled = thresholds.brandFilterEnabled !== false;
+  const keywordSuggestedRequired = thresholds.keywordSuggestedRequired === true;
+  const formatFilter = thresholds.formatFilter ?? null;
+  const minFormatShare = thresholds.minFormatShare ?? 0.5;
+
+  const samples = Array.isArray(metrics.bsrSamples) ? metrics.bsrSamples : [];
+
+  // Rule 2: overall Books BSR — best (lowest) rank among enriched samples.
+  const overallRanks = samples.map((s) => s && s.bsr).filter((r) => r != null);
+  const bestOverallBsr = overallRanks.length ? Math.min(...overallRanks) : null;
+
+  // Rule 3: big-brand exclusion set. brandBlockedAsins is precomputed by the
+  // background from lib/brands.js over title+publisher+author.
+  const brandBlockedAsins = new Set(metrics.brandBlockedAsins || []);
+
+  // Rule 1+2+3 combo: fresh hits.
+  const freshHits = computeFreshHits(samples, {
+    maxBookAgeMonths,
+    overallBsrMax,
+    brandBlockedAsins,
+    now: metrics.freshnessNow || Date.now()
+  });
 
   // Gap F (Revision 2): a niche where one single title owns the majority of
   // all reviews is a branded/single-work-driven term, not a generalizable
-  // demand pool -- exclude it once the evidence floor is met.
+  // demand pool — exclude it once the evidence floor is met.
   const leaderDominates =
     metrics.leaderDominanceRatio != null &&
     metrics.leaderDominanceRatio >= 0.6 &&
     (metrics.totalReviews || 0) >= 30 &&
     (metrics.sampleSize || 0) >= 5;
 
+  // Rules v1: in rule8/strict scopes only EXPLICIT publishable families pass
+  // the content gate; 'unknown' is not a family. 'standard' keeps the legacy
+  // pass-through (unknown passes).
+  const scope = thresholds.contentScope || 'rule8';
+  const unknownPasses = scope === 'standard';
+
   const excluded =
     metrics.contentType === 'high-content-excluded' ||
     metrics.requiresExpertise === true ||
-    leaderDominates;
+    leaderDominates ||
+    (!unknownPasses && (metrics.contentType == null || metrics.contentType === 'unknown'));
+
+  const listingsCap = (market || 'us').toLowerCase() === 'us' ? usListingsMax : otherListingsMax;
 
   const q = {
-    bsr: metrics.bestSubcategoryBsr != null
-      ? metrics.bestSubcategoryBsr <= bsrThreshold
-      : false,
+    fresh: freshHits >= freshHitsMin,
+    bsrOverall: overallBsrEnabled
+      ? bestOverallBsr != null && bestOverallBsr <= overallBsrMax
+      : true,
+    bsr: subBsrEnabled
+      ? metrics.bestSubcategoryBsr != null && metrics.bestSubcategoryBsr <= bsrThreshold
+      : true, // optional ADVANCED gate (legacy v0.3 rule) — default off
     listings: metrics.totalResultsCount != null
-      ? metrics.totalResultsCount <= listingsThreshold
+      ? metrics.totalResultsCount <= listingsCap
       : false,
     volume: metrics.demandProxyScore != null
-      ? metrics.demandProxyScore >= volumeThreshold
+      ? metrics.demandProxyScore >= volumeThreshold &&
+        (!keywordSuggestedRequired || metrics.keywordSuggested === true)
       : false,
+    brand: brandFilterEnabled ? !metrics.brandRisk || !(metrics.brandRisk.topBranded) : true,
+    format: formatFilter
+      ? (metrics.formatShares && metrics.formatShares[formatFilter] != null
+          ? metrics.formatShares[formatFilter] >= minFormatShare
+          : false)
+      : true,
     contentType: contentTypeEnabled ? !excluded : true
   };
-  q.all = q.bsr && q.listings && q.volume && q.contentType;
+  q.all = q.fresh && q.bsrOverall && q.bsr && q.listings && q.volume && q.brand && q.format && q.contentType;
   return q;
 }
 
-export function attachQualifies(record, thresholds = {}) {
+export function attachQualifies(record, thresholds = {}, market) {
   if (!record || typeof record !== 'object') return record;
-  record.qualifies = computeQualifies(record.metrics || {}, thresholds);
+  record.qualifies = computeQualifies(record.metrics || {}, thresholds, market || record.market || 'us');
   return record;
 }
 
@@ -288,6 +359,20 @@ export function preprocessMetrics(listings, extra = {}) {
   const stats = computeListingsStats(listings);
   const withKindle = listings.filter((l) => l.mediaType === 'kindle' || l.mediaType === 'ebook').length;
   stats.kindleShare = listings.length ? withKindle / listings.length : 0;
+  // Rule 7 (v0.8): FBA/Amazon-retail share — flagged (not dropped) so the
+  // dashboard + MyResearchBase cross-check can isolate the KDP pool.
+  const fbaCount = (listings || []).filter((l) => l && l.fba).length;
+  stats.fbaCount = fbaCount;
+  stats.fbaShare = listings.length ? fbaCount / listings.length : 0;
+  // Rules v1 (rule 6): per-format shares from the SERP sample.
+  const byFormat = { kindle: 0, paperback: 0, hardcover: 0, unknown: 0 };
+  listings.forEach((l) => {
+    const t = l.mediaType || 'unknown';
+    byFormat[t] = (byFormat[t] || 0) + 1;
+  });
+  stats.formatShares = listings.length
+    ? Object.fromEntries(Object.entries(byFormat).map(([k, v]) => [k, v / listings.length]))
+    : byFormat;
   stats.estimatedMonthlySales = estimateMonthlySales(stats.medianRank ?? stats.avgBsr);
   stats.sample = listings.slice(0, 12);
   stats.sampleSize = stats.listingCount;
@@ -340,6 +425,6 @@ export function scoreKeyword(keyword, metrics = {}, options = {}) {
     verdict: verdict(base.score * boost),
     score: clamp(base.score * boost, 0, 100)
   };
-  if (options.thresholds) attachQualifies(scored, options.thresholds);
+  if (options.thresholds) attachQualifies(scored, options.thresholds, options.market);
   return scored;
 }

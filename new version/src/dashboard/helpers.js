@@ -65,12 +65,14 @@ export function verdictChip(record) {
 
   const agreed = v.all ? 'yes' : 'no';
   const chips = [
-    `<span class="qual-chip ${v.bsr ? 'qual-ok' : 'qual-bad'}">BSR</span>`,
-    `<span class="qual-chip ${v.listings ? 'qual-ok' : 'qual-bad'}">LIST</span>`,
-    `<span class="qual-chip ${v.volume ? 'qual-ok' : 'qual-bad'}">VOL</span>`,
+    v.fresh != null ? `<span class="qual-chip ${v.fresh ? 'qual-ok' : 'qual-bad'}" title="New (<6mo) + selling + unbranded competitors">NEW</span>` : '',
+    v.bsrOverall != null ? `<span class="qual-chip ${v.bsrOverall ? 'qual-ok' : 'qual-bad'}" title="Overall Books BSR ≤ threshold">BSR</span>` : '',
+    `<span class="qual-chip ${v.listings ? 'qual-ok' : 'qual-bad'}" title="Total results ≤ market cap (US 1000 / others 800)">LIST</span>`,
+    `<span class="qual-chip ${v.volume ? 'qual-ok' : 'qual-bad'}" title="Interest proxy ≥ threshold">VOL</span>`,
+    v.brand === false ? '<span class="qual-chip qual-bad" title="Big-brand book in sample">BRAND</span>' : '',
     `<span class="muted" style="margin-left:2px;font-size:.7rem;">${agreed}</span>`
   ];
-  return chips.join(' ');
+  return chips.filter(Boolean).join(' ');
 }
 
 export function directParentKeyword(record) {

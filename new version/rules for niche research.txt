@@ -1,0 +1,33 @@
+-------------update the tools to work based on those rules---------------------------------------
+1. book must be new published date less than 6 months , and less then 1000 search listing books in US market and less than in 800 search listing in other markets .
+2. it has a bsr number ( it get sales already ), under 200000 bsr for good niche .
+3. remove all big brands books ( published by authors who already has a brand inside amazon because it usully get sales because of the author famous not from organic traffic ) .
+4. must has search volume in amazon search bar ( add first word or alphabitics from a to z , add last  word or alphabitics from a to z) if it displayed mean it get searched by audience.
+5. search all for trademark and copyright inside all markets ( US, FR , UK , JP , AU ...etc ) every market has a specific data base online for search trademark or use https://trademark-search.marcaria.com/en , for all  markets . 
+6. alawys search inside books category , ( add option to search by kindle or papaerback or hardcover )
+7. use amazon.com or other markets links to search ( to get real broad data search and  change zip code specific for each market depands on the capital country for each market ( FR merket get zip code of paris , US market get zip code or new york or wshington DC ..etc , to get real results , or use https://myresearchbase.com/ to filter and avoid to get FBA amazon books in the result search .
+8. for auto dicovering niche always start with low content or Not Generally Low-Content ( avoid novels or fiction or no-fiction books )  
+
+*****Low-Content	
+Notebooks	
+Planners	
+Diaries/Journals	
+Prompt journals
+Log books (i.e., tracking habits, activity, thankfulness)
+Coupon books	
+Score card templates	
+Crafting templates (i.e., scrapbook paper, ephemera books, etc.)	
+Blank sheet music (also known as manuscript or staff paper)
+
+****Not Generally Low-Content	
+Puzzle books
+Coloring books
+Photography
+Sheet music
+Manuals
+Textbooks
+Children's books
+
+
+
+

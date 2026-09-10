@@ -36,16 +36,23 @@ export function extractFaceouts(doc) {
 }
 
 /**
- * Turn a marketplace title into a low-noise keyword-like seed:
- * strip editions/pack parentheticals, format labels, franchise markers,
- * and trailing "by Author" suffixes.
+ * Turn a marketplace title into a low-noise keyword-like seed.
+ *
+ * Rule 8 (v0.8 fix): content-FAMILY words (journal, planner, notebook, log,
+ * coloring book, activity book, puzzle, …) are the niche itself and must be
+ * PRESERVED — stripping them turned "Gratitude Journal for Women" into the
+ * meaningless "gratitude for women". Only packaging is stripped: edition /
+ * format labels, franchise tie-in markers, series numbering, and trailing
+ * "by Author" suffixes. Fiction markers ("a novel") are KEPT so the
+ * content-type classifier can exclude them before they reach the scraper.
  */
 export function cleanTitleToKeyword(title) {
   let t = String(title || '')
     .replace(/\(.*?\)/g, ' ')
-    .replace(/\b(paperback|hardcover|kindle edition|audible audiobook|audio cd|box set|mp3 cd|unknown binding)\b/gi, ' ')
-    .replace(/\b(a novel|an unofficial|unofficial|a coloring book|coloring book|a journal|journal|a planner|planner|a log|log book|a notebook|notebook|companion|activity book)\b/gi, ' ')
-    .replace(/\b(video game|movie tie-in|tv tie-in|book one|book two|series)\b/gi, ' ')
+    .replace(/\[[^\]]*\]/g, ' ')
+    .replace(/\b(paperback|hardcover|kindle edition|kindle|audible audiobook|audible|audio cd|audiobook|box set|boxed set|mp3 cd|unknown binding|large print|spiral-bound|board book edition)\b/gi, ' ')
+    .replace(/\b(an unofficial|unofficial|official|companion|video game|movie tie-in|tv tie-in|film tie-in|netflix tie-in)\b/gi, ' ')
+    .replace(/\b(book one|book two|book three|book 1|book 2|book 3|volume 1|volume 2|vol\.?\s*\d+|series|trilogy|collection|anthology|boxset)\b/gi, ' ')
     .replace(/\s+by\s+[A-Z][\w\s.'-]+$/i, ' ')
     .replace(/\s+/g, ' ')
     .trim()
@@ -53,7 +60,7 @@ export function cleanTitleToKeyword(title) {
     .toLowerCase();
   // Keep only useful keyword-length phrases (2-8 words).
   const words = t.split(/\s+/).filter(Boolean);
-  if (words.length < 1 || words.length > 8) return '';
+  if (words.length < 2 || words.length > 8) return '';
   return words.join(' ');
 }
 

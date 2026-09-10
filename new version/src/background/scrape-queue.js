@@ -69,6 +69,10 @@ class ScrapeQueue {
     return this.status === STATUS.IDLE && this.pendingTabs.size === 0;
   }
 
+  get paused() {
+    return this.status === STATUS.PAUSED;
+  }
+
   enqueue(task) {
     if (this.queue.length >= this.maxSize) this.queue.shift();
     this.queue.push(task);
@@ -219,9 +223,15 @@ class ScrapeQueue {
       await this._sleep(500);
     }
 
+    // v0.8.1 fix: NEVER clear a user-requested PAUSE here. The old code reset
+    // status to IDLE on every loop exit — including exits caused by pause —
+    // so pause evaporated seconds after clicking it and the next Amazon page
+    // auto-started the queue again.
     this.running = false;
-    this.status = STATUS.IDLE;
-    this.stage = STAGE.IDLE;
+    if (this.status !== STATUS.PAUSED) {
+      this.status = STATUS.IDLE;
+      this.stage = STAGE.IDLE;
+    }
     this._emit();
   }
 

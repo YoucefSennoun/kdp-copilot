@@ -26,19 +26,20 @@ const LOW_KIND = {
   low: 'low-content',
   medium: 'medium-content',
   guide: 'guide',
-  personalized: 'personalized'
+  personalized: 'personalized',
+  rule8: 'rule8-content'
 };
 
 /**
- * Content scope (v0.6). 'strict' = Amazon's official "generally low-content"
- * definition ONLY: notebooks, planners, diaries/journals, prompt journals,
- * log/tracking books, coupon books, score-card templates, crafting templates
- * (scrapbook paper, ephemera), blank sheet music. Coloring books, puzzle
- * books, workbooks, guides, novels, manuals and non-fiction are explicitly
- * NOT in that list and are excluded in strict scope.
+ * Content scope (rules v1). 'rule8' = the rules-v1 publishable list:
+ * Low-Content families PLUS the "Not Generally Low-Content" families
+ * (puzzle books, coloring books, photography, sheet music, manuals,
+ * textbooks, children's books). 'strict' = Amazon's official blank-interior
+ * list only. 'standard' = rule8 plus guides and narrow fiction.
  */
 export const CONTENT_SCOPE = {
   STRICT: 'strict',
+  RULE8: 'rule8',
   STANDARD: 'standard'
 };
 
@@ -47,10 +48,18 @@ export function isLowContentNiche(result) {
   return !!result && result.contentType === 'low-content';
 }
 
+/** Rules-v1 scope decision: rule8 allows low + medium + the rule-8 families. */
+export function isRule8Allowed(result) {
+  if (!result) return false;
+  if (result.contentType === 'high-content-excluded' || result.requiresExpertise) return false;
+  return ['low-content', 'medium-content', 'personalized', 'rule8-content'].includes(result.contentType);
+}
+
 /** Pure scope-decision used by the storage scrub and the dashboard gate. */
-export function scopeAllows(result, scope = CONTENT_SCOPE.STRICT) {
+export function scopeAllows(result, scope = CONTENT_SCOPE.RULE8) {
   if (!result) return false;
   if (scope === CONTENT_SCOPE.STRICT) return isLowContentNiche(result);
+  if (scope === CONTENT_SCOPE.RULE8) return isRule8Allowed(result);
   return result.contentType !== 'high-content-excluded' && !result.requiresExpertise;
 }
 
@@ -100,6 +109,30 @@ export const LOW_MEDIUM_SIGNALS = [
   { phrase: 'vision board', label: 'Vision Board Book', kind: 'low' },
   { phrase: 'book of shadows', label: 'Journal', kind: 'low' },
 
+  // --- Non-English low-content family names ---
+  { phrase: 'cahier', label: 'Cahier / Notebook', kind: 'low' },
+  { phrase: 'carnet', label: 'Carnet / Notebook', kind: 'low' },
+  { phrase: 'cuaderno', label: 'Cuaderno / Notebook', kind: 'low' },
+  { phrase: 'hefte', label: 'Heft / Notebook', kind: 'low' },
+  { phrase: 'quaderno', label: 'Quaderno / Notebook', kind: 'low' },
+  { phrase: 'notizheft', label: 'Notizheft / Notebook', kind: 'low' },
+  { phrase: 'carnet de', label: 'Carnet / Notebook', kind: 'low' },
+  { phrase: 'cahier de', label: 'Cahier / Notebook', kind: 'low' },
+  { phrase: 'cuaderno de', label: 'Cuaderno / Notebook', kind: 'low' },
+  { phrase: 'tagebuch', label: 'Tagebuch / Diary', kind: 'low' },
+  { phrase: 'kalender', label: 'Kalender / Calendar', kind: 'low' },
+  { phrase: 'agenda', label: 'Agenda / Planner', kind: 'low' },
+  { phrase: 'planificateur', label: 'Planificateur / Planner', kind: 'low' },
+  { phrase: 'organizer', label: 'Organizer / Planner', kind: 'low' },
+  { phrase: 'diario', label: 'Diario / Diary', kind: 'low' },
+  { phrase: 'caderno', label: 'Caderno / Notebook', kind: 'low' },
+  { phrase: 'calendario', label: 'Calendario / Calendar', kind: 'low' },
+  { phrase: 'livre de coloriage', label: 'Coloring Book', kind: 'medium' },
+  { phrase: 'malbuch', label: 'Malbuch / Coloring Book', kind: 'medium' },
+  { phrase: 'buch der rätsel', label: 'Puzzle Book', kind: 'medium' },
+  { phrase: 'übungsheft', label: 'Übungsheft / Workbook', kind: 'medium' },
+  { phrase: 'cahier dexercices', label: 'Cahier dexercices / Workbook', kind: 'medium' },
+
   // --- Strict low-content (Amazon's "generally low-content" list) ---
   { phrase: 'coupon book', label: 'Coupon Book', kind: 'low' },
   { phrase: 'coupon holder', label: 'Coupon Book', kind: 'low' },
@@ -122,6 +155,33 @@ export const LOW_MEDIUM_SIGNALS = [
   { phrase: 'music manuscript', label: 'Blank Sheet Music', kind: 'low' },
   { phrase: 'blank music paper', label: 'Blank Sheet Music', kind: 'low' },
   { phrase: 'music writing paper', label: 'Blank Sheet Music', kind: 'low' },
+
+  // --- Rules v1 (rule 8): "Not Generally Low-Content" families ---
+  // kind 'rule8' = allowed in rule8 scope; excluded in strict scope.
+  { phrase: 'photo book', label: 'Photography Book', kind: 'rule8' },
+  { phrase: 'photography book', label: 'Photography Book', kind: 'rule8' },
+  { phrase: 'coffee table book', label: 'Photography Book', kind: 'rule8' },
+  { phrase: 'picture book of', label: 'Photography Book', kind: 'rule8' },
+  { phrase: 'sheet music book', label: 'Sheet Music (published)', kind: 'rule8' },
+  { phrase: 'songbook', label: 'Sheet Music (published)', kind: 'rule8' },
+  { phrase: 'piano book', label: 'Sheet Music (published)', kind: 'rule8' },
+  { phrase: 'guitar book', label: 'Sheet Music (published)', kind: 'rule8' },
+  { phrase: 'music book', label: 'Sheet Music (published)', kind: 'rule8' },
+  { phrase: 'owners manual', label: 'Manual', kind: 'rule8' },
+  { phrase: 'user manual', label: 'Manual', kind: 'rule8' },
+  { phrase: 'instruction manual', label: 'Manual', kind: 'rule8' },
+  { phrase: 'textbook', label: 'Textbook', kind: 'rule8' },
+  { phrase: 'text book', label: 'Textbook', kind: 'rule8' },
+  { phrase: 'picture book', label: "Children's Book", kind: 'rule8' },
+  { phrase: 'board book', label: "Children's Book", kind: 'rule8' },
+  { phrase: 'early reader', label: "Children's Book", kind: 'rule8' },
+  { phrase: 'bedtime story', label: "Children's Book", kind: 'rule8' },
+  { phrase: 'bedtime stories', label: "Children's Book", kind: 'rule8' },
+  { phrase: 'kids story', label: "Children's Book", kind: 'rule8' },
+  { phrase: 'chapter book', label: "Children's Book", kind: 'rule8' },
+  { phrase: 'chapter books', label: "Children's Book", kind: 'rule8' },
+  { phrase: 'childrens book', label: "Children's Book", kind: 'rule8' },
+  { phrase: "children's book", label: "Children's Book", kind: 'rule8' },
  
   // --- Medium-content: activity / coloring / puzzle / workbook ---
   { phrase: 'coloring book', label: 'Coloring Book', kind: 'medium' },
@@ -451,6 +511,14 @@ function dominantLowSignal(text) {
   return null;
 }
 
+/** Rule-8 scope: any non-high family qualifies (low, medium, rule8, guide-adjacent). */
+function dominantRule8Signal(text) {
+  for (const s of LOW_MEDIUM_SIGNALS) {
+    if (s.kind !== 'guide' && hasPhrase(text, s.phrase)) return s;
+  }
+  return null;
+}
+
 /** Strict scope: only the kind==='low' candidates count. */
 function dominantStrictLowSignal(text) {
   for (const s of LOW_MEDIUM_SIGNALS) {
@@ -527,7 +595,7 @@ export function classifyContentType({
   kindleShare = null,
   sampleSize = 0,
   allowFiction = true,
-  scope = 'standard'
+  scope = 'rule8'
 } = {}) {
   const kw = normalize(keyword);
   const nTitles = (titles || []).length;
@@ -548,6 +616,72 @@ export function classifyContentType({
   //     is excluded here and can be re-held by no later stage.
   if (isStrict) {
     return strictScopeResult({ kw, kwLow, titles, categories, kindleShare, sampleSize, nTitles });
+  }
+
+  // 1c. RULE8 scope (rules v1): low-content + puzzle + coloring + photography
+  //     + published sheet music + manuals + textbooks + children's books.
+  //     Guides, fiction, memoirs, expertise-required works stay excluded —
+  //     rule 8 says "avoid novels or fiction or non-fiction books".
+  if (scope === CONTENT_SCOPE.RULE8) {
+    const rule8Hit = kwLow.find((s) => s.kind === 'rule8');
+    const strongHit = kwLow.find((s) => s.kind === 'low' || s.kind === 'medium');
+    const fictionish = isFictionish(kw);
+    const anyExpert = kwHigh.some((s) => s.expertise);
+    const writerCraft = /write a book|writing a book|how to write|how to publish|become an author|for authors|for writers|book marketing|author marketing|self[- ]?publishing|get published|publishing guide|author platform|sell more books/i.test(kw);
+
+    // A rule8/low/medium family signal wins over overlaps ("math textbook"
+    // is a textbook even though 'textbook' also appears in the high list).
+    if (rule8Hit || strongHit) {
+      const sig = dominantRule8Signal(kw) || dominantLowSignal(kw);
+      return result(LOW_KIND[sig.kind] || 'medium-content', sig.label, 'title-regex', 'high', false);
+    }
+
+    // No family signal: fiction / expertise / writer-craft / generic all excluded.
+    if (fictionish) {
+      return result('high-content-excluded', 'Fiction / narrative (excluded by rules v1)', 'title-regex', 'high', false);
+    }
+    if (anyExpert) {
+      return result('high-content-excluded', 'Expertise-required non-fiction', 'title-regex', 'high', true);
+    }
+    if (kwHigh.length || writerCraft) {
+      return result('high-content-excluded', writerCraft ? 'Writer-craft / publishing guide' : 'High-content (non-family)', 'title-regex', 'high', false);
+    }
+
+    // Title-level verdict (>=3 sampled cards): rule8 family majority wins;
+    // high-content domination excludes.
+    if (nTitles >= 3) {
+      const highMatches = countMatches(titles, HIGH_CONTENT_SIGNALS, (t) => t);
+      const familyMatches = titles.filter((t) => dominantRule8Signal(t) || dominantLowSignal(t)).length;
+      if (familyMatches >= Math.max(3, Math.ceil(nTitles * 0.3)) && familyMatches >= highMatches) {
+        const sig = dominantRule8Signal(titles.join(' ')) || dominantLowSignal(titles.join(' '));
+        return result(LOW_KIND[sig.kind] || 'medium-content', sig.label, 'title-regex', 'medium', false);
+      }
+      if (highMatches >= Math.max(3, Math.ceil(nTitles * 0.6)) && familyMatches < highMatches * 0.5) {
+        return result('high-content-excluded', 'High-content titles dominate', 'title-regex', 'medium', false);
+      }
+    }
+
+    // Category breadcrumbs: deny fiction/narrative/expertise categories.
+    // Children's-book categories are rescuable only with a family signal at
+    // the keyword level (checked above).
+    const catTextR8 = (categories || []).join(' ');
+    if (catTextR8) {
+      if (DENY_CATEGORY_PATTERNS.some((re) => re.test(catTextR8)) && !/children/i.test(catTextR8)) {
+        const expert = /medical|clinical|pharmaco|patholog|diagnos|oncology|cardiology|neurolog|psychiatr|law\b|legal|engineering|physics|chemistry|biology|mathematics|political science/i.test(catTextR8);
+        return result('high-content-excluded', expert ? 'Lives under an expertise-required category' : 'Lives under a high-content category', 'category-breadcrumb', 'medium', expert);
+      }
+      if (/children/i.test(catTextR8)) {
+        return result('rule8-content', "Children's books (category)", 'category-breadcrumb', 'medium', false);
+      }
+    }
+
+    // Kindle-format tell: blank-interior/activity books rarely ship Kindle.
+    if (kindleShare != null && sampleSize >= 4 && kindleShare < 0.15) {
+      return result('low-content', 'No Kindle titles (interior / activity style)', 'format-signal', 'low', false);
+    }
+
+    // Unproven keywords don't qualify in rule8 scope — only explicit families.
+    return result('high-content-excluded', 'Not in the rules-v1 publishable families', 'scope-rule8', 'high', false);
   }
 
   // 2. Keyword-level high-content markers — exclude unless a STRONG

@@ -1,17 +1,22 @@
 import { send, fmt, toneClass, escapeHtml, showStatus, totalResultsLabel, bsrLabel, contentChip } from '../helpers.js';
-import { settings } from '../app.js';
+import { settings, invalidateSettings } from '../app.js';
 import { openDetailDrawer } from './detail.js';
 import { getMarkets } from './markets.js';
 
 let allKeywords = [];
 let sortState = { key: 'score', dir: 'desc' };
 let queueSnapshot = { size: 0, idle: true, pending: 0, stage: 'idle' };
-let discoveryInFlight = false;
 
 const $ = (id) => document.getElementById(id);
 
-export function onShow() {
-  populateMarkets();
+export async function onShow() {
+  await populateMarkets();
+  const s = await settings();
+  if (s.formatFilter && ['kindle', 'paperback', 'hardcover'].includes(s.formatFilter)) {
+    $('format-select').value = s.formatFilter;
+  } else {
+    $('format-select').value = '';
+  }
   refreshKeywords();
 }
 
@@ -63,7 +68,7 @@ function renderTable() {
   const body = $('keywords-body');
   if (!rows.length) {
     body.innerHTML =
-      '<tr><td colspan="11" class="muted">No keywords yet. Expand a seed, browse Amazon, or click "Discover Niches".</td></tr>';
+      '<tr><td colspan="11" class="muted">No keywords yet. Enter a format keyword (e.g. "logbook", "journal", "cahier") and click Research.</td></tr>';
     return;
   }
 
@@ -113,79 +118,54 @@ function scoreColor(s) {
 async function handleExpand() {
   const seed = $('seed-input').value.trim();
   if (!seed) {
-    showStatus($('status'), 'Enter a seed keyword first.', true);
+    showStatus($('status'), 'Enter a keyword first (e.g. "logbook", "journal", "planner").', true);
     return;
   }
   const btn = $('go-btn');
   btn.disabled = true;
   btn.classList.add('loading');
   try {
-    const res = await send('EXPAND_SEED', { seed, market: currentMarket() });
-    showStatus($('status'), `Expanded "${seed}" → ${res.count} keywords; queued scraping.`);
-    refreshKeywords();
-  } catch (err) {
-    showStatus($('status'), `Expansion failed: ${err.message}`, true);
-  } finally {
-    btn.disabled = false;
-    btn.classList.remove('loading');
-  }
-}
-
-async function handleDiscover(mode) {
-  if (discoveryInFlight) return;
-  discoveryInFlight = true;
-  const btn = mode === 'findme' ? $('find-me-btn') : $('discover-btn');
-  btn.disabled = true;
-  btn.classList.add('loading');
-  try {
-    const res = await send(mode === 'findme' ? 'FIND_ME_NICHES' : 'DISCOVER_NICHES', {
-      market: currentMarket()
-    });
+    const res = await send('RESEARCH_FORMAT', { seed, market: currentMarket() });
     showStatus(
       $('status'),
-      res.count
-        ? `Discover: ${res.count} new keywords sourced from ${res.consumed} live listings; queued for scraping + BSR enrichment.`
-        : 'Discover: no new keywords (all already tracked).'
+      `Researching "${seed}" — ${res.phrasesFound} phrases from autocomplete, ${res.tasksQueued} SERP scrapes queued. ` +
+      `Corpus: ${res.corpus.amazon} Amazon + ${res.corpus.google} Google suggestions. ` +
+      `Results will appear as they scrape.`
     );
     refreshKeywords();
   } catch (err) {
-    showStatus($('status'), `Discovery failed: ${err.message}`, true);
+    showStatus($('status'), `Research failed: ${err.message}`, true);
   } finally {
-    discoveryInFlight = false;
     btn.disabled = false;
     btn.classList.remove('loading');
   }
 }
 
-async function handleFetchSuggestions() {
-  const seed = $('seed-input').value.trim();
-  if (!seed) {
-    showStatus($('status'), 'Enter a keyword to fetch autocomplete.', true);
-    return;
-  }
+/** Rules v1 (rule 6): the format select is persisted into settings so scrape
+ *  tasks + the format qualify gate use it. */
+async function persistFormatFilter() {
   try {
-    const r = await send('FETCH_SUGGESTIONS', { seed, market: currentMarket() });
-    showStatus($('status'), `Autocomplete: ${r.amazon.length} Amazon + ${r.google.length} Google suggested keywords.`);
-  } catch (err) {
-    showStatus($('status'), `Autocomplete failed: ${err.message}`, true);
-  }
-}
-
-async function handleScrapeAll() {
-  try {
-    const r = await send('SCRAPE_ALL', { market: currentMarket() });
-    showStatus($('status'), r.count ? `Queued scraping for ${r.count} keywords.` : 'Nothing unscraped to queue.');
-  } catch (err) {
-    showStatus($('status'), `Scrape all failed: ${err.message}`, true);
+    const s = await settings();
+    const format = $('format-select').value || null;
+    if (s.formatFilter !== format) {
+      await send('SAVE_SETTINGS', { settings: { ...s, formatFilter: format } });
+      invalidateSettings();
+    }
+  } catch {
+    // non-fatal: format filter simply won't persist this session
   }
 }
 
 function exportCsv() {
   const cols = [
     'keyword', 'market', 'score', 'demand', 'competition', 'margin', 'confidence',
-    'estimatedMonthlySales', 'bestSubcategoryBsr', 'bestSubcategoryBsrCategory',
-    'totalResultsCount', 'resultsCountIsApprox', 'demandProxyScore', 'bsrCoverage',
-    'verdict', 'scrapedAt'
+    'estimatedMonthlySales', 'freshHits', 'bestOverallBsr', 'bestSubcategoryBsr',
+    'totalResultsCount', 'resultsCountIsApprox', 'demandProxyScore', 'keywordSuggested',
+    'suffixHits', 'prefixHits',
+    'brandRiskCount', 'brandRiskMatched', 'authorBrand',
+    'fbaCount', 'fbaShare',
+    'kindleShare', 'paperbackShare', 'hardcoverShare',
+    'bsrCoverage', 'verdictLabel', 'qualifiesAll', 'contentType', 'scrapedAt'
   ];
   const esc = (v) => {
     const s = v == null ? '' : String(v);
@@ -196,6 +176,15 @@ function exportCsv() {
     .filter((k) => !(k.keyword || '').startsWith('dp/'))
     .map((k) => {
       const m = k.metrics || {};
+      const samples = Array.isArray(m.bsrSamples) ? m.bsrSamples : [];
+      const overallRanks = samples.map((s) => s && s.bsr).filter((r) => r != null);
+      const freshHits = samples.filter((s) =>
+        s && s.bsr != null && s.pubDateEpoch != null &&
+        s.pubDateEpoch >= (Date.now() - 6 * 30.44 * 24 * 60 * 60 * 1000) &&
+        s.bsr <= 200000
+      ).length;
+      const shares = m.formatShares || {};
+      const proof = (m.demandProxyBreakdown && m.demandProxyBreakdown.alphabetProof) || {};
       const row = {
         keyword: k.keyword,
         market: k.market,
@@ -205,13 +194,27 @@ function exportCsv() {
         margin: k.margin,
         confidence: k.confidence,
         estimatedMonthlySales: k.estimatedMonthlySales,
+        freshHits,
+        bestOverallBsr: overallRanks.length ? Math.min(...overallRanks) : '',
         bestSubcategoryBsr: m.bestSubcategoryBsr,
-        bestSubcategoryBsrCategory: m.bestSubcategoryBsrCategory,
         totalResultsCount: m.totalResultsCount,
         resultsCountIsApprox: m.resultsCountIsApprox,
         demandProxyScore: m.demandProxyScore,
+        keywordSuggested: m.keywordSuggested,
+        suffixHits: proof.suffixHits ?? '',
+        prefixHits: proof.prefixHits ?? '',
+        brandRiskCount: m.brandRisk ? m.brandRisk.count : '',
+        brandRiskMatched: m.brandRisk ? (m.brandRisk.matched || []).join('|') : '',
+        authorBrand: m.authorBrand ? `${m.authorBrand.author} (${m.authorBrand.count})` : '',
+        fbaCount: m.fbaCount ?? '',
+        fbaShare: m.fbaShare ?? '',
+        kindleShare: shares.kindle,
+        paperbackShare: shares.paperback,
+        hardcoverShare: shares.hardcover,
         bsrCoverage: m.bsrCoverage,
-        verdict: k.verdict,
+        verdictLabel: (k.verdict && k.verdict.label) || '',
+        qualifiesAll: k.qualifies ? k.qualifies.all : '',
+        contentType: m.contentType,
         scrapedAt: k.scrapedAt
       };
       return cols.map((c) => esc(row[c])).join(',');
@@ -238,26 +241,26 @@ async function handleStartOver() {
 
 async function handleRowAction(keyword, act) {
   const k = allKeywords.find((x) => x.keyword === keyword);
+  const market = (k && k.market) || currentMarket();
   if (!k) return;
   try {
     switch (act) {
       case 'ai': {
-        const btn = document.querySelector(`#keywords-body a.kw-detail`);
         showStatus($('status'), `Analyzing "${keyword}" with Gemini…`);
-        const r = await send('ANALYZE_NICHE', { keyword });
-        openDetailDrawer(keyword, { analysis: r });
+        const r = await send('ANALYZE_NICHE', { keyword, market });
+        openDetailDrawer(keyword, { market, analysis: r });
         break;
       }
       case 'legal':
-        await send('CHECK_TRADEMARK', { keyword });
-        openDetailDrawer(keyword, { legalRequested: true });
+        await send('CHECK_TRADEMARK', { keyword, market });
+        openDetailDrawer(keyword, { market, legalRequested: true });
         break;
       case 'scrape':
-        await send('SCRAPE_KEYWORD', { keyword, market: currentMarket() });
+        await send('SCRAPE_KEYWORD', { keyword, market });
         showStatus($('status'), `Queued scrape for "${keyword}".`);
         break;
       case 'delete':
-        await send('DELETE_KEYWORD', { keyword });
+        await send('DELETE_KEYWORD', { keyword, market });
         refreshKeywords();
         showStatus($('status'), `Deleted "${keyword}".`);
         break;
@@ -273,13 +276,16 @@ async function handleRowAction(keyword, act) {
 
 export function bind() {
   $('go-btn').addEventListener('click', handleExpand);
-  $('discover-btn').addEventListener('click', () => handleDiscover('discover'));
-  $('find-me-btn').addEventListener('click', () => handleDiscover('findme'));
-  $('suggest-btn').addEventListener('click', handleFetchSuggestions);
-  $('scrape-all-btn').addEventListener('click', handleScrapeAll);
   $('export-btn').addEventListener('click', exportCsv);
   $('refresh-btn').addEventListener('click', refreshKeywords);
   $('start-over-btn').addEventListener('click', handleStartOver);
+  $('format-select').addEventListener('change', () => {
+    persistFormatFilter().then(() =>
+      showStatus($('status'), $('format-select').value
+        ? `Format filter set to ${$('format-select').value} — applies to new scrapes.`
+        : 'Format filter cleared — all formats.')
+    );
+  });
   $('pause-btn').addEventListener('click', () => {
     if (queueSnapshot.idle) return;
     if (queueSnapshot.paused) {
