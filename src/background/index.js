@@ -418,7 +418,7 @@ async function handleMessage(message, sender = {}) {
     case 'GET_SETTINGS':
       return getSettings();
     case 'GET_MODELS': {
-      const models = await fetchModelChoices();
+      const models = await fetchModelChoices('gemini');
       return { models: models.map((m) => m.id), customModels: CUSTOM_MODEL_CHOICES };
     }
     case 'SAVE_SETTINGS': {

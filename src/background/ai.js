@@ -58,6 +58,14 @@ export function customTransportFor(model) {
   return RESPONSES_API_MODELS.has(String(model || '').trim()) ? 'responses' : 'chat';
 }
 
+/** Stored Gemini model ids always look like gemini-…; anything else (e.g. a
+ *  custom id saved while the other provider was active) heals to the default.
+ *  Pure — safe to unit-test. */
+export function sanitizeGeminiModel(model) {
+  const m = String(model || '').trim();
+  return /^gemini-/i.test(m) ? m : DEFAULT_MODEL;
+}
+
 /** Resolved AI configuration from stored settings. */
 export async function getAIConfig() {
   const { kdpSettings } = await chrome.storage.local.get(['kdpSettings']);
@@ -65,7 +73,7 @@ export async function getAIConfig() {
   return {
     provider: s.aiProvider === 'custom' ? 'custom' : 'gemini',
     geminiKey: s.apiKey || '',
-    geminiModel: s.model || DEFAULT_MODEL,
+    geminiModel: sanitizeGeminiModel(s.model || DEFAULT_MODEL),
     customBaseUrl: String(s.customBaseUrl || DEFAULT_CUSTOM_BASE_URL).replace(/\/+$/, ''),
     customKey: s.customApiKey || '',
     customModel: String(s.customModel || DEFAULT_CUSTOM_MODEL).trim()
@@ -203,11 +211,15 @@ export async function completeJson({ apiKey, model, systemInstruction, prompt })
   });
 }
 
-export async function fetchModelChoices() {
-  const cfg = await getAIConfig().catch(() => null);
-  // The custom provider has no small live model list worth fetching (the
-  // OpenRouter catalog is hundreds of models) — serve the curated presets.
-  if (cfg && cfg.provider === 'custom') return CUSTOM_MODEL_CHOICES;
+export async function fetchModelChoices(provider) {
+  // Explicit provider keeps each Settings dropdown on its own list: the
+  // Gemini dropdown must never be filled with custom ids (saving those into
+  // `model` is what broke Gemini calls after switching providers).
+  if (provider === 'custom') return CUSTOM_MODEL_CHOICES;
+  if (!provider) {
+    const cfg = await getAIConfig().catch(() => null);
+    if (cfg && cfg.provider === 'custom') return CUSTOM_MODEL_CHOICES;
+  }
   const apiKey = await getApiKey();
   if (!apiKey) return MODEL_CHOICES;
   try {

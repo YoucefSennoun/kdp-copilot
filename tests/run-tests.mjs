@@ -19,7 +19,7 @@ import {
   deriveSuggestionProxy
 } from '../src/lib/proxy.js';
 import { classifyContentType, isLowContentNiche, scopeAllows } from '../src/lib/content-type.js';
-import { isSuggestibleSuggestion, buildChatBody, parseChatResponse, buildResponsesBody, parseResponsesResponse, customTransportFor } from '../src/background/ai.js';
+import { isSuggestibleSuggestion, buildChatBody, parseChatResponse, buildResponsesBody, parseResponsesResponse, customTransportFor, sanitizeGeminiModel, fetchModelChoices } from '../src/background/ai.js';
 import { parsePubDate, isFreshPub } from '../src/lib/dates.js';
 import { computeBrandRisk, matchBlockedBrand, matchFamousAuthor, computeAuthorFrequencyRisk, flagBrandedSamples } from '../src/lib/brands.js';
 import { buildRegistryLookups, localTrademarkScreen, COPYRIGHT_NOTE } from '../src/lib/trademark-registry.js';
@@ -819,6 +819,15 @@ console.log('\n[26] v0.8.6: custom AI provider (Zen/OpenRouter transports)');
   threw = false;
   try { parseResponsesResponse({ output: [] }); } catch { threw = true; }
   assert(threw, 'empty responses output throws');
+}
+
+console.log('\n[27] v0.8.10: provider switching keeps each model list intact');
+{
+  assert(sanitizeGeminiModel('gemini-3.6-flash') === 'gemini-3.6-flash', 'valid Gemini id passes through');
+  assert(sanitizeGeminiModel('big-pickle') === 'gemini-3.6-flash', 'custom id saved as Gemini model heals to default');
+  assert(sanitizeGeminiModel('') === 'gemini-3.6-flash' && sanitizeGeminiModel(null) === 'gemini-3.6-flash', 'missing Gemini model heals to default');
+  const customs = await fetchModelChoices('custom');
+  assert(Array.isArray(customs) && customs.some((m) => m.id === 'xiaomi/mimo-v2.5'), 'explicit custom list serves presets without stored settings');
 }
 
 console.log(`\n${passed} passed, ${failed} failed`);

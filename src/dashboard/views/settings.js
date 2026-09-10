@@ -86,7 +86,12 @@ async function handleSave() {
   const next = {
     ...s,
     apiKey: $('api-key').value.trim() || null,
-    model: $('model-select').value || undefined,
+    // While the custom provider is active the Gemini dropdown holds no
+    // meaningful selection — keep the stored Gemini model untouched so
+    // switching back doesn't send a custom id to Google.
+    model: $('ai-provider').value === 'custom'
+      ? (s.model || undefined)
+      : ($('model-select').value || undefined),
     aiProvider: $('ai-provider').value === 'custom' ? 'custom' : 'gemini',
     customBaseUrl: $('custom-base-url').value.trim() || 'https://openrouter.ai/api/v1',
     customApiKey: $('custom-api-key').value.trim() || null,
