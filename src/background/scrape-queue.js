@@ -1,4 +1,6 @@
 const DEFAULT_INTERVAL_MS = 3500;
+const DEFAULT_ENRICHMENT_INTERVAL_MS = 6000;
+const DEFAULT_DISCOVERY_INTERVAL_MS = 3500;
 const DEFAULT_TIMEOUT_MS = 30000;
 const MAX_QUEUE_SIZE = 200;
 
@@ -8,20 +10,41 @@ const STATUS = {
   PAUSED: 'paused'
 };
 
+const STAGE = {
+  IDLE: 'idle',
+  SERP: 'serp',
+  ENRICHMENT: 'enrichment',
+  DISCOVERY: 'discovery'
+};
+
 /**
- * Serialized scrape orchestrator. Opens one Amazon tab at a time for a
- * keyword, waits for the content script to report SERP_PARSED (background
- * closes the tab), and only then moves to the next item. A timeout guard
- * closes orphaned tabs so long research batches never leak tabs.
+ * Serialized scrape orchestrator. Opens one Amazon tab at a time for a task,
+ * waits for the content script to report SERP_PARSED / PRODUCT_PARSED
+ * (background closes the tab), and only then moves to the next item. A timeout
+ * guard closes orphaned tabs so long research batches never leak tabs.
+ *
+ * Task model (Phase 2):
+ *   { type: 'serp',    keyword, market, scrapedPages }
+ *   { type: 'product', asin, parentKeyword, market }
+ * Product (BSR enrichment) tasks run at a slower interval (stealth decision).
  */
 class ScrapeQueue {
-  constructor({ intervalMs = DEFAULT_INTERVAL_MS, timeoutMs = DEFAULT_TIMEOUT_MS, maxSize = MAX_QUEUE_SIZE } = {}) {
+  constructor({
+    intervalMs = DEFAULT_INTERVAL_MS,
+    enrichmentIntervalMs = DEFAULT_ENRICHMENT_INTERVAL_MS,
+    discoveryIntervalMs = DEFAULT_DISCOVERY_INTERVAL_MS,
+    timeoutMs = DEFAULT_TIMEOUT_MS,
+    maxSize = MAX_QUEUE_SIZE
+  } = {}) {
     this.queue = [];
     this.intervalMs = intervalMs;
+    this.enrichmentIntervalMs = enrichmentIntervalMs;
+    this.discoveryIntervalMs = discoveryIntervalMs;
     this.timeoutMs = timeoutMs;
     this.maxSize = maxSize;
     this.running = false;
     this.status = STATUS.IDLE;
+    this.stage = STAGE.IDLE;
     this.onScrape = null;
     this.pendingTabs = new Map(); // tabId -> { task, resolve, timer }
     this.listeners = new Set();
@@ -46,6 +69,10 @@ class ScrapeQueue {
     return this.status === STATUS.IDLE && this.pendingTabs.size === 0;
   }
 
+  get paused() {
+    return this.status === STATUS.PAUSED;
+  }
+
   enqueue(task) {
     if (this.queue.length >= this.maxSize) this.queue.shift();
     this.queue.push(task);
@@ -62,6 +89,10 @@ class ScrapeQueue {
 
   setInterval(ms) {
     this.intervalMs = ms;
+  }
+
+  setEnrichmentInterval(ms) {
+    this.enrichmentIntervalMs = ms;
   }
 
   clear() {
@@ -89,6 +120,7 @@ class ScrapeQueue {
     this.pendingTabs.clear();
     this.running = false;
     this.status = STATUS.IDLE;
+    this.stage = STAGE.IDLE;
     this._emit();
   }
 
@@ -100,8 +132,8 @@ class ScrapeQueue {
   }
 
   /**
-   * Called by the background message router when SERP_PARSED arrives.
-   * Resolves the pending task tied to the sender tab and closes it.
+   * Called by the background message router when SERP_PARSED / PRODUCT_PARSED
+   * arrives. Resolves the pending task tied to the sender tab and closes it.
    */
   resolveTab(tabId, result) {
     const pending = this.pendingTabs.get(tabId);
@@ -126,6 +158,27 @@ class ScrapeQueue {
     return true;
   }
 
+  /**
+   * Resolve a task as failed (e.g. CAPTCHA-blocked page) while still closing
+   * its tab promptly — avoids waiting out the whole timeout per blocked page.
+   */
+  resolveTabFailed(tabId, result) {
+    const pending = this.pendingTabs.get(tabId);
+    if (!pending) return false;
+    clearTimeout(pending.timer);
+    this.pendingTabs.delete(tabId);
+    this.failed++;
+    pending.resolve({ ok: true, result });
+    this._safeClose(tabId);
+    this._emit();
+    return true;
+  }
+
+  taskForTab(tabId) {
+    const pending = this.pendingTabs.get(tabId);
+    return pending ? pending.task : null;
+  }
+
   _start() {
     if (this.status === STATUS.PAUSED || this.running) return;
     this.running = true;
@@ -136,6 +189,12 @@ class ScrapeQueue {
   async _loop() {
     while (this.queue.length > 0 && this.status !== STATUS.PAUSED) {
       const task = this.queue.shift();
+      this.stage = task && task.type === 'product'
+        ? STAGE.ENRICHMENT
+        : task && task.type === 'discovery'
+          ? STAGE.DISCOVERY
+          : STAGE.SERP;
+      this._emit();
 
       try {
         if (this.onScrape) {
@@ -149,7 +208,13 @@ class ScrapeQueue {
       this._emit();
 
       if (this.queue.length > 0 && this.status !== STATUS.PAUSED) {
-        await this._sleep(this.intervalMs);
+        const next = this.queue[0];
+        const delay = (next && next.type === 'product')
+          ? this.enrichmentIntervalMs
+          : (next && next.type === 'discovery')
+            ? this.discoveryIntervalMs || DEFAULT_DISCOVERY_INTERVAL_MS
+            : this.intervalMs;
+        await this._sleep(delay);
       }
     }
 
@@ -158,8 +223,15 @@ class ScrapeQueue {
       await this._sleep(500);
     }
 
+    // v0.8.1 fix: NEVER clear a user-requested PAUSE here. The old code reset
+    // status to IDLE on every loop exit — including exits caused by pause —
+    // so pause evaporated seconds after clicking it and the next Amazon page
+    // auto-started the queue again.
     this.running = false;
-    this.status = STATUS.IDLE;
+    if (this.status !== STATUS.PAUSED) {
+      this.status = STATUS.IDLE;
+      this.stage = STAGE.IDLE;
+    }
     this._emit();
   }
 
@@ -227,7 +299,8 @@ class ScrapeQueue {
       pending: this.pendingTabs.size,
       completed: this.completed,
       failed: this.failed,
-      idle: this.idle
+      idle: this.idle,
+      stage: this.stage
     };
     this.listeners.forEach((fn) => fn(snapshot));
   }
@@ -235,4 +308,4 @@ class ScrapeQueue {
 
 export const scrapeQueue = new ScrapeQueue();
 
-export { STATUS };
+export { STATUS, STAGE };

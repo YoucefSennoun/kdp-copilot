@@ -23,7 +23,7 @@
         flex-wrap: wrap;
       }
       hgroup h1 { margin-bottom: 0; }
-      headeria nav, header nav ul { margin: 0; }
+      header nav, header nav ul { margin: 0; }
       nav a { cursor: pointer; }
       .tab-content { display: none; }
       .tab-content.active { display: block; }
@@ -64,6 +64,8 @@
       .ai-output { white-space: pre-wrap; background: var(--pico-card-background-color, #fafafa); padding: 0.9rem; border-radius: 8px; font-size: 0.88rem; }
       .pill-row { display: flex; gap: 0.4rem; flex-wrap: wrap; margin: 0.5rem 0; }
       .pill { background: #f5d9a3; padding: 2px 8px; border-radius: 10px; font-size: 0.8rem; color: #222; }
+      .chip { display: inline-block; margin-left: 5px; padding: 1px 7px; border-radius: 4px; font-size: 0.7rem; font-weight: 700; background: #dfe8f0; color: #1a5276; vertical-align: middle; }
+      .chip-bad { background: #fbdcd9; color: #c0392b; }
       .loading { opacity: 0.6; }
       .suggestions-panel .source-tag { font-size: 0.7rem; text-transform: uppercase; letter-spacing: 0.4px; background: #e3e6ed; border-radius: 3px; padding: 1px 5px; }
       .legal-badge {
@@ -101,17 +103,33 @@
       .legal-flag { padding: 0.45rem 0.6rem; border-left: 3px solid #e53935; background: rgba(229, 57, 53, 0.08); border-radius: 4px; margin: 0.4rem 0; font-size: 0.88rem; }
       .legal-safekeyword { padding: 0.5rem 0.6rem; background: rgba(46, 125, 50, 0.1); border-left: 3px solid #2e7d32; border-radius: 4px; font-size: 0.88rem; }
       .legal-note { margin: 0.2rem 0; font-size: 0.85rem; color: var(--pico-muted-color); }
+      .legal-registry-link {
+        display: inline-block;
+        padding: 2px 10px;
+        border: 1px solid #90a4ae;
+        border-radius: 12px;
+        font-size: 0.78rem;
+        font-weight: 600;
+        text-decoration: none;
+        color: #1a5276;
+      }
+      .legal-registry-link:hover { background: #e3e6ed; }
+      .qual-chip { display: inline-block; padding: 1px 6px; border-radius: 4px; font-size: 0.7rem; font-weight: 700; }
+      .qual-ok { background: #2e7d32; color: #fff; }
+      .qual-bad { background: #e0e0e0; color: #666; }
+      .stage-text { font-weight: 600; }
     </style>
   </head>
   <body>
     <header>
       <hgroup>
         <h1>KDP Copilot</h1>
-        <p class="muted">Amazon KDP Niche &amp; Keyword Research — Productor-style scoring + Gemini AI</p>
+        <p class="muted">Amazon KDP Niche &amp; Keyword Research — BSR + real result counts + interest proxy + Gemini AI</p>
       </hgroup>
       <nav>
         <ul>
           <li><a data-view="explorer" class="active">Explorer</a></li>
+          <li><a data-view="niches">Niche Finder</a></li>
           <li><a data-view="suggestions">Suggestions</a></li>
           <li><a data-view="settings">Settings</a></li>
         </ul>
@@ -121,14 +139,21 @@
     <main>
       <section id="view-explorer" class="tab-content active">
         <div class="inline-grid">
-          <input id="seed-input" type="text" placeholder="Seed keyword, e.g. 'low carb cookbook'" />
+          <input id="seed-input" type="text" placeholder="Enter keyword, e.g. 'logbook', 'journal', 'planner' — we'll expand a-z and scrape everything" />
           <div>
-            <label for="market-select" class="muted" style="font-size: .8rem;">Market</label>
+            <label for="market-select" class="muted" style="font-size:.8rem;">Market</label>
             <select id="market-select"></select>
           </div>
-          <button id="go-btn">Expand &amp; Auto-Scrape</button>
-          <button id="suggest-btn" class="secondary outline">Fetch Autocomplete</button>
-          <button id="scrape-all-btn" class="secondary outline">Scrape Unscraped</button>
+          <div>
+            <label for="format-select" class="muted" style="font-size:.8rem;">Format</label>
+            <select id="format-select" title="Restrict scrapes to one binding (rule 6)">
+              <option value="">All formats</option>
+              <option value="kindle">Kindle</option>
+              <option value="paperback">Paperback</option>
+              <option value="hardcover">Hardcover</option>
+            </select>
+          </div>
+          <button id="go-btn">Research</button>
           <button id="export-btn" class="secondary">Export CSV</button>
           <button id="refresh-btn" class="secondary outline">Refresh</button>
           <button id="start-over-btn" class="contrast outline" title="Clear all keywords, suggestions and analyses to start a fresh niche search">Start Over</button>
@@ -156,12 +181,53 @@
                 <th class="sortable" data-sort="margin">Margin</th>
                 <th class="sortable" data-sort="confidence">Conf.</th>
                 <th>Est. Sales</th>
+                <th style="min-width:110px;">Results</th>
                 <th class="sortable" data-sort="scrapedAt">Scraped</th>
                 <th>Actions</th>
               </tr>
             </thead>
             <tbody id="keywords-body">
-              <tr><td colspan="10" class="muted">No keywords yet. Browse Amazon or expand a seed to get started.</td></tr>
+              <tr><td colspan="11" class="muted">No keywords yet. Enter a format keyword (e.g. "logbook", "journal", "cahier") and click Research.</td></tr>
+            </tbody>
+          </table>
+        </article>
+      </section>
+
+      <section id="view-niches" class="tab-content">
+        <div class="inline-grid">
+          <p class="muted" style="margin:0; flex:1; min-width:260px; font-size:.85rem;">
+            Only keywords meeting <b>all</b> rules-v1 gates are shown here:
+            fresh &lt;6mo sellers ·
+            BSR ≤ <span id="niche-bsr-cap">200000</span> ·
+            results ≤ <span id="niche-listings-cap">1000/800</span> ·
+            interest ≥ <span id="niche-volume-cap">50</span> ·
+            brand-free ·
+            KDP-publishable content.
+          </p>
+          <button id="niche-refresh" class="secondary outline">Refresh</button>
+          <button id="niche-scrub" class="secondary outline" title="Delete stored keywords that fail the current content scope">Scrub out-of-scope</button>
+        </div>
+        <div id="niche-status" class="muted" style="margin-bottom:0.75rem;"></div>
+        <article id="niche-detail" hidden></article>
+        <article>
+          <table id="niches-table">
+            <thead>
+              <tr>
+                <th>Keyword</th>
+                <th>Mkt</th>
+                <th class="sortable" data-sort-key="score">Score</th>
+                <th>Fresh Hits</th>
+                <th>Best BSR</th>
+                <th>Total Results</th>
+                <th>Interest Proxy</th>
+                <th>Content</th>
+                <th>Brand</th>
+                <th>Gates</th>
+                <th>Actions</th>
+              </tr>
+            </thead>
+            <tbody id="niches-body">
+              <tr><td colspan="11" class="muted">No qualifying niches yet. Scrape keywords or run "Find Me Niches".</td></tr>
             </tbody>
           </table>
         </article>
@@ -234,6 +300,167 @@
               SERP research panel
             </label>
           </div>
+
+          <h3 style="margin-top:1.25rem;">Rules v1 — niche qualification gates</h3>
+          <div class="grid" style="grid-template-columns: repeat(3, 1fr);">
+            <div>
+              <label for="max-age-months">Max book age (months)</label>
+              <input id="max-age-months" type="number" min="1" max="36" step="1" />
+            </div>
+            <div>
+              <label for="fresh-hits-min">Min fresh hits (new + selling + unbranded)</label>
+              <input id="fresh-hits-min" type="number" min="1" max="10" step="1" />
+            </div>
+            <div>
+              <label for="overall-bsr-max">Max overall Books BSR</label>
+              <input id="overall-bsr-max" type="number" min="1000" step="10000" />
+            </div>
+          </div>
+          <div class="grid" style="grid-template-columns: repeat(2, 1fr); margin-top:.75rem;">
+            <div>
+              <label for="us-listings-max">Max results — US market</label>
+              <input id="us-listings-max" type="number" min="1" step="50" />
+            </div>
+            <div>
+              <label for="other-listings-max">Max results — other markets</label>
+              <input id="other-listings-max" type="number" min="1" step="50" />
+            </div>
+          </div>
+          <div class="grid" style="grid-template-columns: repeat(3, 1fr); margin-top:.75rem;">
+            <div>
+              <label for="volume-threshold">Min interest proxy</label>
+              <input id="volume-threshold" type="number" min="0" max="100" step="5" />
+            </div>
+            <label title="Rule 4 strict mode: the keyword itself must surface in Amazon's autocomplete before its suggestions count.">
+              <input type="checkbox" id="opt-keyword-suggested" />
+              Keyword must appear in autocomplete
+            </label>
+            <label title="Rule 3: exclude niches whose sample contains a big-brand (licensed/publisher/stationery megabrand) book.">
+              <input type="checkbox" id="opt-brandfilter" checked />
+              Big-brand exclusion
+            </label>
+          </div>
+          <div class="grid" style="grid-template-columns: repeat(2, 1fr); margin-top:.75rem;">
+            <label title="Rules v1 rule 6: restrict scrapes to a single binding. Applies to new scrape tasks.">
+              Format filter (rule 6)
+              <select id="format-filter">
+                <option value="">All formats</option>
+                <option value="kindle">Kindle only</option>
+                <option value="paperback">Paperback only</option>
+                <option value="hardcover">Hardcover only</option>
+              </select>
+            </label>
+            <label title="Optional ADVANCED gate (legacy): best sub-category BSR must also be ≤ the cap. Off by default — the rules-v1 BSR gate uses overall Books rank.">
+              <input type="checkbox" id="opt-subbsr" />
+              Also require sub-category BSR ≤ <input id="bsr-threshold" type="number" min="1" step="10" style="display:inline-block; width:90px; margin-left:4px;" />
+            </label>
+          </div>
+
+          <div class="grid" style="grid-template-columns: repeat(2, 1fr); margin-top:.75rem;">
+            <label>
+              <input type="checkbox" id="opt-contentfilter" checked />
+              Only show KDP-publishable content
+            </label>
+            <label title="Rules v1 (rule 8): low-content plus puzzle/coloring/photography/sheet-music/manual/textbook/children's. Strict = blank interiors only. Standard adds guides + narrow fiction.">
+              Content scope
+              <select id="content-scope">
+                <option value="rule8">Rules v1 — Low + Not-Generally-Low-Content</option>
+                <option value="strict">Strict — low-content only (Amazon definition)</option>
+                <option value="standard">Standard — also guides/fiction niches</option>
+              </select>
+            </label>
+          </div>
+
+          <div class="grid" style="grid-template-columns: repeat(2, 1fr);">
+            <label title="Only relevant in Standard scope.">
+              <input type="checkbox" id="opt-niche-fiction" />
+              Allow narrow niche fiction (e.g. cozy mysteries)
+            </label>
+            <p class="muted" style="margin:0; align-self:center; font-size:.8rem;">
+              Fiction is never allowed in Rules-v1 or Strict scope.
+            </p>
+          </div>
+
+          <h3 style="margin-top:1.25rem;">Trademark sweep markets (rule 5)</h3>
+          <p class="muted" style="font-size:.8rem; margin-bottom:.4rem;">
+            Markets checked by the trademark/copyright screen. Registry deep links (USPTO, UKIPO, EUIPO, J-PlatPat, IP Australia, CIPO, IMPI + Marcaria aggregator) are attached to every report.
+          </p>
+          <div class="grid" style="grid-template-columns: repeat(6, 1fr);" id="tm-markets">
+            <label><input type="checkbox" class="tm-market" value="us" checked /> US</label>
+            <label><input type="checkbox" class="tm-market" value="uk" checked /> UK</label>
+            <label><input type="checkbox" class="tm-market" value="fr" checked /> FR</label>
+            <label><input type="checkbox" class="tm-market" value="de" checked /> DE</label>
+            <label><input type="checkbox" class="tm-market" value="it" checked /> IT</label>
+            <label><input type="checkbox" class="tm-market" value="es" checked /> ES</label>
+            <label><input type="checkbox" class="tm-market" value="ca" checked /> CA</label>
+            <label><input type="checkbox" class="tm-market" value="jp" checked /> JP</label>
+            <label><input type="checkbox" class="tm-market" value="au" checked /> AU</label>
+            <label><input type="checkbox" class="tm-market" value="mx" checked /> MX</label>
+            <label><input type="checkbox" class="tm-market" value="br" checked /> BR</label>
+            <label><input type="checkbox" class="tm-market" value="in" checked /> IN</label>
+            <label><input type="checkbox" class="tm-market" value="nl" checked /> NL</label>
+            <label><input type="checkbox" class="tm-market" value="se" checked /> SE</label>
+            <label><input type="checkbox" class="tm-market" value="pl" checked /> PL</label>
+            <label><input type="checkbox" class="tm-market" value="tr" checked /> TR</label>
+            <label><input type="checkbox" class="tm-market" value="sa" checked /> SA</label>
+            <label><input type="checkbox" class="tm-market" value="ae" checked /> AE</label>
+            <label><input type="checkbox" class="tm-market" value="sg" checked /> SG</label>
+            <label><input type="checkbox" class="tm-market" value="eg" checked /> EG</label>
+          </div>
+
+          <h3 style="margin-top:1.25rem;">BSR enrichment (auto product-page deep-dive)</h3>
+          <div class="grid" style="grid-template-columns: repeat(3, 1fr);">
+            <label>
+              <input type="checkbox" id="opt-enrichment" checked />
+              Enrich shortlisted keywords
+            </label>
+            <div>
+              <label for="enrichment-size">Products per keyword</label>
+              <select id="enrichment-size">
+                <option value="4">4</option>
+                <option value="6">6</option>
+                <option value="8" selected>8</option>
+                <option value="10">10</option>
+                <option value="12">12</option>
+              </select>
+            </div>
+            <div>
+              <label for="enrichment-min-score">Min pre-BSR score</label>
+              <select id="enrichment-min-score">
+                <option value="40">40</option>
+                <option value="50" selected>50</option>
+                <option value="60">60</option>
+                <option value="70">70</option>
+              </select>
+            </div>
+          </div>
+
+          <h3 style="margin-top:1.25rem;">Discovery Mode (seedless)</h3>
+          <div class="grid" style="grid-template-columns: repeat(3, 1fr);">
+            <label>
+              <input type="checkbox" id="opt-discovery" />
+              Scheduled discovery (daily alert)
+            </label>
+            <div>
+              <label for="discovery-categories">Categories per run</label>
+              <select id="discovery-categories">
+                <option value="4">4</option>
+                <option value="8" selected>8</option>
+                <option value="12">12</option>
+                <option value="16">16</option>
+                <option value="20">20</option>
+              </select>
+            </div>
+            <div>
+              <label for="discovery-max-keywords">Keywords per run</label>
+              <select id="discovery-max-keywords">
+                <option value="6">6</option>
+                <option value="12" selected>12</option>
+                <option value="20">20</option>
+              </select>
+            </div>
+          </div>
+
           <button id="save-settings-btn">Save Settings</button>
           <div id="settings-status" class="muted"></div>
         </article>

@@ -1,412 +1,408 @@
-import { loadDetailView } from './detail.js';
-import { populateMarketSelects } from './../app.js';
+import { send, fmt, toneClass, escapeHtml, showStatus, totalResultsLabel, bsrLabel, contentChip } from '../helpers.js';
+import { settings, invalidateSettings } from '../app.js';
+import { openDetailDrawer } from './detail.js';
+import { getMarkets } from './markets.js';
 
-let rows = [];
-let legals = {};
-let sortField = 'score';
-let sortDir = 'desc';
-let loadedMarket = null;
+let allKeywords = [];
+let sortState = { key: 'score', dir: 'desc' };
+let queueSnapshot = { size: 0, idle: true, pending: 0, stage: 'idle' };
 
-export { updateQueueBar };
+const $ = (id) => document.getElementById(id);
 
-export function loadExplorerView() {
-  populateMarketSelects();
-
-  const marketSelect = document.getElementById('market-select');
-  const seedInput = document.getElementById('seed-input');
-
-  if (!marketSelect.dataset.bound) {
-    marketSelect.addEventListener('change', () => {
-      loadedMarket = marketSelect.value;
-      refresh();
-    });
-    document.getElementById('go-btn').onclick = () => handleExpand(seedInput.value);
-    document.getElementById('suggest-btn').onclick = () => handleFetchSuggestions(seedInput.value);
-    document.getElementById('scrape-all-btn').onclick = handleScrapeAll;
-    document.getElementById('export-btn').onclick = exportCsv;
-    document.getElementById('refresh-btn').onclick = refresh;
-    document.getElementById('start-over-btn').onclick = startOver;
-    document.getElementById('pause-btn').onclick = () => {
-      const btn = document.getElementById('pause-btn');
-      if (btn.dataset.paused === 'true') {
-        chrome.runtime.sendMessage({ type: 'RESUME_QUEUE' });
-        btn.textContent = 'Pause';
-        btn.dataset.paused = '';
-      } else {
-        chrome.runtime.sendMessage({ type: 'PAUSE_QUEUE' });
-        btn.textContent = 'Resume';
-        btn.dataset.paused = 'true';
-      }
-    };
-    seedInput.addEventListener('keydown', (e) => {
-      if (e.key === 'Enter') handleExpand(seedInput.value);
-    });
-    marketSelect.dataset.bound = 'true';
+export async function onShow() {
+  await populateMarkets();
+  const s = await settings();
+  if (s.formatFilter && ['kindle', 'paperback', 'hardcover'].includes(s.formatFilter)) {
+    $('format-select').value = s.formatFilter;
+  } else {
+    $('format-select').value = '';
   }
+  refreshKeywords();
+}
 
-  document.querySelectorAll('th.sortable').forEach((th) => {
-    th.onclick = () => {
-      const field = th.dataset.sort;
-      if (sortField === field) {
-        sortDir = sortDir === 'desc' ? 'asc' : 'desc';
-      } else {
-        sortField = field;
-        sortDir = 'desc';
-      }
-      render();
-    };
+async function populateMarkets() {
+  const list = await getMarkets();
+  const sel = $('market-select');
+  const current = await settings();
+  sel.innerHTML = list
+    .map((m) => `<option value="${m.code}">${escapeHtml(m.name)}</option>`)
+    .join('');
+  if (current.market) sel.value = current.market;
+}
+
+async function refreshKeywords() {
+  allKeywords = await send('GET_KEYWORDS');
+  renderTable();
+}
+
+function currentMarket() {
+  return $('market-select').value || 'us';
+}
+
+// ---------------------------------------------------------------------------
+// Rendering
+// ---------------------------------------------------------------------------
+
+function renderTable() {
+  const rows = [...allKeywords].filter((k) => !(k.keyword || '').startsWith('dp/'));
+  const { key, dir } = sortState;
+  const val = (k) => {
+    switch (key) {
+      case 'score': return k.score ?? -Infinity;
+      case 'demand': return k.demand ?? -Infinity;
+      case 'competition': return k.competition ?? Infinity;
+      case 'margin': return k.margin ?? -Infinity;
+      case 'confidence': return k.confidence ?? -Infinity;
+      case 'scrapedAt': return k.scrapedAt ?? 0;
+      default: return k[key] ?? '';
+    }
+  };
+  rows.sort((a, b) => {
+    const av = val(a); const bv = val(b);
+    if (typeof av === 'string' || typeof bv === 'string') {
+      return (dir === 'asc' ? 1 : -1) * String(av).localeCompare(String(bv));
+    }
+    return (dir === 'asc' ? 1 : -1) * ((av || 0) - (bv || 0));
   });
 
-  refresh();
-}
-
-async function refresh() {
-  setStatus('Loading…');
-  try {
-    const res = await chrome.runtime.sendMessage({ type: 'GET_KEYWORDS' });
-    if (!res.ok) throw new Error(res.error);
-    rows = res.result || [];
-    const legalRes = await chrome.runtime.sendMessage({ type: 'GET_ALL_LEGAL' });
-    if (legalRes.ok) {
-      legals = {};
-      (legalRes.result || []).forEach((l) => { legals[l.keyword] = l; });
-    }
-    const settingsRes = await chrome.runtime.sendMessage({ type: 'GET_SETTINGS' });
-    if (settingsRes.ok) {
-      loadedMarket = loadedMarket || settingsRes.result.market || 'us';
-      if (document.getElementById('market-select').value !== loadedMarket) {
-        document.getElementById('market-select').value = loadedMarket;
-      }
-    }
-    render();
-    setStatus(`Loaded ${rows.length} keyword${rows.length === 1 ? '' : 's'}.`);
-    refreshQueueBar();
-  } catch (err) {
-    setStatus(`Error: ${err.message}`);
-  }
-}
-
-async function refreshQueueBar() {
-  const res = await chrome.runtime.sendMessage({ type: 'QUEUE_STATUS' });
-  if (res.ok) updateQueueBar(res.result);
-}
-
-function updateQueueBar(q) {
-  if (!q) return;
-  const el = document.getElementById('queue-status');
-  const fill = document.getElementById('queue-fill');
-  const total = q.completed + q.failed + q.size;
-  const pct = total ? Math.round(((q.completed + q.failed) / total) * 100) : 0;
-  el.textContent = q.running
-    ? `Scraping… ${q.pending} open tab${q.pending === 1 ? '' : 's'}, ${q.size} queued, ${q.completed} done, ${q.failed} failed`
-    : q.idle
-      ? `Idle — ${q.completed} scraped, ${q.failed} failed`
-      : `Paused — ${q.size} queued, ${q.completed} done`;
-  fill.style.width = `${pct}%`;
-  const btn = document.getElementById('pause-btn');
-  if (btn) btn.textContent = q.paused ? 'Resume' : 'Pause';
-  if (q.idle) render();
-}
-
-function setStatus(text) {
-  document.getElementById('status').textContent = text;
-}
-
-function render() {
-  const filterMarket = document.getElementById('market-select').value;
-  const visible = loadedMarket || filterMarket
-    ? rows.filter((r) => (loadedMarket ? r.market === loadedMarket : r.market === filterMarket))
-    : rows;
-
-  const sorted = [...visible].sort((a, b) => {
-    const av = a[sortField] ?? 0;
-    const bv = b[sortField] ?? 0;
-    if (sortField === 'scrapedAt') return sortDir === 'desc' ? (av || 0) - (bv || 0) : (bv || 0) - (av || 0);
-    return sortDir === 'desc' ? bv - av : av - bv;
-  });
-
-  const body = document.getElementById('keywords-body');
-
-  if (!sorted.length) {
-    body.innerHTML = '<tr><td colspan="10" class="muted">No keywords for this market yet. Expand a seed or browse Amazon.</td></tr>';
+  const body = $('keywords-body');
+  if (!rows.length) {
+    body.innerHTML =
+      '<tr><td colspan="11" class="muted">No keywords yet. Enter a format keyword (e.g. "logbook", "journal", "cahier") and click Research.</td></tr>';
     return;
   }
 
-  body.innerHTML = sorted
-    .map((r) => {
-      const ver = r.verdict || {};
-      const legal = legals[r.keyword];
-      const legalBadge = legal && legal.risk
-        ? `<span class="legal-badge ${escapeAttr(legal.risk)}" title="${escapeAttr(legal.verdict || '')}">⚖ ${escapeHtml(legal.risk)}</span>`
-        : '';
-      return `<tr>
-        <td>${escapeHtml(r.keyword)}${legalBadge}</td>
-        <td class="muted">${escapeHtml((r.market || 'us').toUpperCase())}</td>
-        <td class="score-badge">${fmt(r.score)}</td>
-        <td>${fmtPct(r.demand)}</td>
-        <td>${fmtPct(r.competition)}</td>
-        <td>${fmtPct(r.margin)}</td>
-        <td>${fmtPct(r.confidence)}</td>
-        <td>${fmtSales(r.estimatedMonthlySales)}</td>
-        <td class="muted">${fmtDate(r.scrapedAt)}</td>
+  body.innerHTML = rows
+    .map((k, i) => {
+      const bsr = bsrLabel(k);
+      const results = totalResultsLabel(k);
+      const hasBsr = (k.metrics && Array.isArray(k.metrics.bsrSamples) && k.metrics.bsrSamples.length) || (k.metrics && k.metrics.bestSubcategoryBsr != null);
+      return `<tr data-keyword="${escapeHtml(k.keyword)}" data-index="${i}">
         <td>
-          <button data-action="detail" data-keyword="${escapeAttr(r.keyword)}" class="secondary outline">Detail</button>
-          <button data-action="ai" data-keyword="${escapeAttr(r.keyword)}" class="secondary outline">AI</button>
-          <button data-action="legal" data-keyword="${escapeAttr(r.keyword)}" class="secondary outline">Legal</button>
-          <button data-action="delete" data-keyword="${escapeAttr(r.keyword)}" class="secondary outline">Delete</button>
+          <a href="#" class="kw-detail" title="Open detail">${escapeHtml(k.keyword)}</a>
+          ${hasBsr ? `<span class="pill" title="BSR enriched">BSR</span>` : ''}
+          ${contentChip(k)}
+        </td>
+        <td class="muted">${escapeHtml(k.market || 'us').toUpperCase()}</td>
+        <td class="score-badge" style="color:${scoreColor(k.score)}">${fmt.score(k.score)}</td>
+        <td>${fmt.pct(k.demand)}</td>
+        <td>${fmt.pct(k.competition)}</td>
+        <td>${fmt.pct(k.margin)}</td>
+        <td>${fmt.pct(k.confidence)}</td>
+        <td class="muted">${fmt.sales(k.estimatedMonthlySales)}</td>
+        <td class="muted">${results}</td>
+        <td class="muted" title="${escapeHtml(k.scrapedAt || '')}">${fmt.date(k.scrapedAt)}</td>
+        <td>
+          <a href="#" class="af-link" data-act="ai" title="Analyze niche">AI</a> ·
+          <a href="#" class="af-link" data-act="legal" title="Trademark/copyright">LK</a> ·
+          <a href="#" class="af-link" data-act="scrape" title="(Re)scrape SERP">SC</a> ·
+          <a href="#" class="af-link" data-act="delete" title="Delete">DEL</a>
         </td>
       </tr>`;
     })
     .join('');
 
-  body.querySelectorAll('[data-action="detail"]').forEach((btn) => {
-    btn.onclick = () => showDetail(btn.dataset.keyword);
-  });
-  body.querySelectorAll('[data-action="ai"]').forEach((btn) => {
-    btn.onclick = () => handleAi(btn.dataset.keyword);
-  });
-  body.querySelectorAll('[data-action="legal"]').forEach((btn) => {
-    btn.onclick = () => handleLegal(btn.dataset.keyword);
-  });
-  body.querySelectorAll('[data-action="delete"]').forEach((btn) => {
-    btn.onclick = () => removeKeyword(btn.dataset.keyword);
-  });
+  body.querySelectorAll('th.sortable').forEach(() => {});
 }
 
-async function showDetail(keyword) {
-  const res = await chrome.runtime.sendMessage({ type: 'GET_KEYWORD', keyword });
-  if (!res.ok || !res.result) return setStatus(`Error: ${res.error || 'not found'}`);
-  await loadDetailView(res.result);
+function scoreColor(s) {
+  if (s == null) return '#999';
+  const cls = toneClass(s);
+  return cls;
 }
 
-async function handleLegal(keyword) {
-  setStatus(`Checking "${keyword}" for trademark/copyright issues…`);
-  try {
-    const res = await chrome.runtime.sendMessage({ type: 'CHECK_TRADEMARK', keyword });
-    if (!res.ok) {
-      setStatus(`Legal check failed: ${res.error}`);
-      return;
-    }
-    legals[keyword] = res.result;
-    setStatus(`Legal screen saved${res.result.ai ? ' (AI)' : ' (heuristic)'}.`);
-    openLegalModal(res.result);
-    render();
-  } catch (err) {
-    setStatus(`Legal check error: ${err.message}`);
+// ---------------------------------------------------------------------------
+// Actions
+// ---------------------------------------------------------------------------
+
+async function handleExpand() {
+  const seed = $('seed-input').value.trim();
+  if (!seed) {
+    showStatus($('status'), 'Enter a keyword first (e.g. "logbook", "journal", "planner").', true);
+    return;
   }
-}
-
-function openLegalModal(legal) {
-  const riskClass = ['low', 'medium', 'high'].includes(legal.risk) ? legal.risk : 'medium';
-  const flags = (legal.flagged || []).map((f) => `
-    <div class="legal-flag">
-      <b>${escapeHtml(f.term)}</b>
-      <span class="muted"> · ${escapeHtml(f.type)}</span>${f.owner ? ` <span class="muted">· ${escapeHtml(f.owner)}</span>` : ''}
-      <div>${escapeHtml(f.why || '')}</div>
-    </div>`).join('');
-
-  document.getElementById('legal-content').innerHTML = `
-    <p><span class="legal-risk ${riskClass}">${escapeHtml(legal.risk)} risk</span>
-      <span class="muted" style="margin-left:.4rem; font-size:.8rem;">
-        ${legal.ai ? 'Gemini AI review' : 'local heuristic screen'} · ${fmtDate(legal.checkedAt)}
-      </span></p>
-    <p>${escapeHtml(legal.verdict || '')}</p>
-    ${flags ? `<h3 style="font-size:1rem;">Flagged terms (${flags.length ? (legal.flagged || []).length : 0})</h3>${flags}` : '<p class="muted">No protected terms flagged.</p>'}
-    ${legal.safeKeyword && legal.safeKeyword !== legal.keyword ? `
-      <div class="legal-safekeyword"><b>Compliant alternative:</b> ${escapeHtml(legal.safeKeyword)}</div>` : ''}
-    ${(legal.notes || []).map((n) => `<p class="legal-note">• ${escapeHtml(n)}</p>`).join('')}
-    <div style="display:flex; gap:.5rem; margin-top:1rem;">
-      <button id="legal-rerun" class="secondary outline">Re-check with AI</button>
-      <button id="legal-close" class="contrast outline">Close</button>
-    </div>`;
-
-  const keyword = legal.keyword;
-  document.getElementById('legal-rerun').onclick = async () => {
-    const btn = document.getElementById('legal-rerun');
-    btn.disabled = true;
-    btn.textContent = 'Checking…';
-    const res = await chrome.runtime.sendMessage({ type: 'CHECK_TRADEMARK', keyword });
+  const btn = $('go-btn');
+  btn.disabled = true;
+  btn.classList.add('loading');
+  try {
+    const res = await send('RESEARCH_FORMAT', { seed, market: currentMarket() });
+    showStatus(
+      $('status'),
+      `Researching "${seed}" — ${res.phrasesFound} phrases from autocomplete, ${res.tasksQueued} SERP scrapes queued. ` +
+      `Corpus: ${res.corpus.amazon} Amazon + ${res.corpus.google} Google suggestions. ` +
+      `Results will appear as they scrape.`
+    );
+    refreshKeywords();
+  } catch (err) {
+    showStatus($('status'), `Research failed: ${err.message}`, true);
+  } finally {
     btn.disabled = false;
-    btn.textContent = 'Re-check with AI';
-    if (res.ok) {
-      legals[keyword] = res.result;
-      openLegalModal(res.result);
-      render();
-    } else {
-      document.getElementById('legal-content').insertAdjacentHTML('beforeend',
-        `<p class="legal-note" style="color:#e53935;">Re-check failed: ${escapeHtml(res.error)}</p>`);
+    btn.classList.remove('loading');
+  }
+}
+
+/** Rules v1 (rule 6): the format select is persisted into settings so scrape
+ *  tasks + the format qualify gate use it. */
+async function persistFormatFilter() {
+  try {
+    const s = await settings();
+    const format = $('format-select').value || null;
+    if (s.formatFilter !== format) {
+      await send('SAVE_SETTINGS', { settings: { ...s, formatFilter: format } });
+      invalidateSettings();
     }
-  };
-  document.getElementById('legal-close').onclick = () => {
-    document.getElementById('legal-modal').hidden = true;
-  };
-  document.getElementById('legal-modal').hidden = false;
-  document.addEventListener('keydown', function esc(e) {
-    if (e.key === 'Escape') {
-      document.getElementById('legal-modal').hidden = true;
-      document.removeEventListener('keydown', esc);
-    }
-  });
-}
-
-async function handleAi(keyword) {
-  setStatus(`Analyzing "${keyword}" with Gemini…`);
-  try {
-    const res = await chrome.runtime.sendMessage({ type: 'ANALYZE_NICHE', keyword });
-    if (!res.ok) {
-      setStatus(`AI error: ${res.error}`);
-      return;
-    }
-    setStatus('AI analysis saved.');
-    showDetail(keyword);
-  } catch (err) {
-    setStatus(`AI error: ${err.message}`);
+  } catch {
+    // non-fatal: format filter simply won't persist this session
   }
-}
-
-async function handleExpand(seed) {
-  if (!seed || !seed.trim()) return setStatus('Enter a seed keyword first.');
-  const market = document.getElementById('market-select').value;
-  setStatus(`Expanding "${seed}" (${market.toUpperCase()})…`);
-  try {
-    const res = await chrome.runtime.sendMessage({ type: 'EXPAND_SEED', seed: seed.trim(), market });
-    if (!res.ok) throw new Error(res.error);
-    setStatus(`Got ${res.result.count} suggestions. Auto-scraping starting — check the progress bar.`);
-    refresh();
-  } catch (err) {
-    setStatus(`Error: ${err.message}`);
-  }
-}
-
-async function handleFetchSuggestions(seed) {
-  if (!seed || !seed.trim()) return setStatus('Enter a keyword to pull suggestions for.');
-  const market = document.getElementById('market-select').value;
-  setStatus(`Fetching Amazon & Google suggestions for "${seed}"…`);
-  try {
-    const res = await chrome.runtime.sendMessage({
-      type: 'FETCH_SUGGESTIONS',
-      seed: seed.trim(),
-      market
-    });
-    if (!res.ok) throw new Error(res.error);
-    const { amazon, google } = res.result;
-    await chrome.runtime.sendMessage({
-      type: 'SCRAPE_KEYWORD',
-      payload: { keyword: seed.trim(), market }
-    });
-    setStatus(`Got ${amazon.length} Amazon + ${google.length} Google suggestions.`);
-  } catch (err) {
-    setStatus(`Error: ${err.message}`);
-  }
-}
-
-async function handleScrapeAll() {
-  const market = document.getElementById('market-select').value;
-  setStatus('Queueing unscraped keywords…');
-  try {
-    const res = await chrome.runtime.sendMessage({
-      type: 'SCRAPE_ALL',
-      filter: { market }
-    });
-    if (!res.ok) throw new Error(res.error);
-    setStatus(`Queued ${res.result.count} keywords for scraping.`);
-    refreshQueueBar();
-  } catch (err) {
-    setStatus(`Error: ${err.message}`);
-  }
-}
-
-async function startOver() {
-  const confirmed = confirm(
-    'Start over?\n\nThis permanently deletes all researched keywords, suggestions and AI analyses ' +
-    'and aborts any running scrape. Your settings are kept.'
-  );
-  if (!confirmed) return;
-
-  setStatus('Clearing workspace…');
-  try {
-    const res = await chrome.runtime.sendMessage({ type: 'CLEAR_ALL' });
-    if (!res.ok) throw new Error(res.error);
-    rows = [];
-    setStatus('Cleared. Ready for a fresh niche search.');
-    render();
-    refreshQueueBar();
-  } catch (err) {
-    setStatus(`Error: ${err.message}`);
-  }
-}
-
-async function removeKeyword(keyword) {
-  const res = await chrome.runtime.sendMessage({ type: 'DELETE_KEYWORD', keyword });
-  if (!res.ok) return setStatus(`Error: ${res.error}`);
-  setStatus('Deleted.');
-  refresh();
 }
 
 function exportCsv() {
-  const filterMarket = loadedMarket || document.getElementById('market-select').value;
-  const visible = rows.filter((r) => r.market === filterMarket);
-  const header = [
+  const cols = [
     'keyword', 'market', 'score', 'demand', 'competition', 'margin', 'confidence',
-    'est_monthly_sales', 'listing_count', 'avg_price', 'avg_reviews', 'avg_rating',
-    'median_bsr', 'top_concentration', 'closing', 'forecast'
+    'estimatedMonthlySales', 'freshHits', 'bestOverallBsr', 'bestSubcategoryBsr',
+    'totalResultsCount', 'resultsCountIsApprox', 'demandProxyScore', 'keywordSuggested',
+    'suffixHits', 'prefixHits',
+    'brandRiskCount', 'brandRiskMatched', 'authorBrand',
+    'fbaCount', 'fbaShare',
+    'kindleShare', 'paperbackShare', 'hardcoverShare',
+    'bsrCoverage', 'verdictLabel', 'qualifiesAll', 'contentType', 'scrapedAt'
   ];
-  const lines = visible.map((r) => {
-    const m = r.metrics || {};
-    return [
-      csv(r.keyword),
-      r.market || 'us',
-      Math.round(r.score || 0),
-      (r.demand || 0).toFixed(3),
-      (r.competition || 0).toFixed(3),
-      (r.margin || 0).toFixed(3),
-      (r.confidence || 0).toFixed(3),
-      r.estimatedMonthlySales ?? '',
-      m.listingCount ?? '',
-      m.avgPrice ?? '',
-      m.avgReviewCount ?? m.avgReviews ?? '',
-      m.avgRating ?? '',
-      m.medianRank ?? m.avgBsr ?? '',
-      m.topConcentration ?? '',
-      r.scrapedAt ? new Date(r.scrapedAt).toISOString() : '',
-      (r.verdict && r.verdict.label) || ''
-    ].join(',');
-  });
-  const blob = new Blob([[header.join(','), ...lines].join('\n')], { type: 'text/csv' });
+  const esc = (v) => {
+    const s = v == null ? '' : String(v);
+    return /[",\n]/.test(s) ? `"${s.replace(/"/g, '""')}"` : s;
+  };
+  const header = cols.map((c) => esc(c)).join(',');
+  const lines = allKeywords
+    .filter((k) => !(k.keyword || '').startsWith('dp/'))
+    .map((k) => {
+      const m = k.metrics || {};
+      const samples = Array.isArray(m.bsrSamples) ? m.bsrSamples : [];
+      const overallRanks = samples.map((s) => s && s.bsr).filter((r) => r != null);
+      const freshHits = samples.filter((s) =>
+        s && s.bsr != null && s.pubDateEpoch != null &&
+        s.pubDateEpoch >= (Date.now() - 6 * 30.44 * 24 * 60 * 60 * 1000) &&
+        s.bsr <= 200000
+      ).length;
+      const shares = m.formatShares || {};
+      const proof = (m.demandProxyBreakdown && m.demandProxyBreakdown.alphabetProof) || {};
+      const row = {
+        keyword: k.keyword,
+        market: k.market,
+        score: k.score,
+        demand: k.demand,
+        competition: k.competition,
+        margin: k.margin,
+        confidence: k.confidence,
+        estimatedMonthlySales: k.estimatedMonthlySales,
+        freshHits,
+        bestOverallBsr: overallRanks.length ? Math.min(...overallRanks) : '',
+        bestSubcategoryBsr: m.bestSubcategoryBsr,
+        totalResultsCount: m.totalResultsCount,
+        resultsCountIsApprox: m.resultsCountIsApprox,
+        demandProxyScore: m.demandProxyScore,
+        keywordSuggested: m.keywordSuggested,
+        suffixHits: proof.suffixHits ?? '',
+        prefixHits: proof.prefixHits ?? '',
+        brandRiskCount: m.brandRisk ? m.brandRisk.count : '',
+        brandRiskMatched: m.brandRisk ? (m.brandRisk.matched || []).join('|') : '',
+        authorBrand: m.authorBrand ? `${m.authorBrand.author} (${m.authorBrand.count})` : '',
+        fbaCount: m.fbaCount ?? '',
+        fbaShare: m.fbaShare ?? '',
+        kindleShare: shares.kindle,
+        paperbackShare: shares.paperback,
+        hardcoverShare: shares.hardcover,
+        bsrCoverage: m.bsrCoverage,
+        verdictLabel: (k.verdict && k.verdict.label) || '',
+        qualifiesAll: k.qualifies ? k.qualifies.all : '',
+        contentType: m.contentType,
+        scrapedAt: k.scrapedAt
+      };
+      return cols.map((c) => esc(row[c])).join(',');
+    });
+  const blob = new Blob([[header, ...lines].join('\n')], { type: 'text/csv' });
   const a = document.createElement('a');
   a.href = URL.createObjectURL(blob);
-  a.download = `kdp-copilot-${filterMarket}.csv`;
+  a.download = `kdp-copilot-${new Date().toISOString().slice(0, 19).replace(/[:T]/g, '-')}.csv`;
   a.click();
   URL.revokeObjectURL(a.href);
-  setStatus(`Exported ${lines.length} rows.`);
 }
 
-function csv(s) {
-  return `"${String(s).replace(/"/g, '""')}"`;
+async function handleStartOver() {
+  if (!confirm('Clear ALL keywords, suggestions, analyses and discovery history?')) return;
+  try {
+    await send('CLEAR_ALL');
+    allKeywords = [];
+    renderTable();
+    showStatus($('status'), 'Workspace cleared.');
+  } catch (err) {
+    showStatus($('status'), err.message, true);
+  }
 }
 
-function fmt(v) {
-  return v == null ? '—' : Number(v).toFixed(0);
+async function handleRowAction(keyword, act) {
+  const k = allKeywords.find((x) => x.keyword === keyword);
+  const market = (k && k.market) || currentMarket();
+  if (!k) return;
+  try {
+    switch (act) {
+      case 'ai': {
+        showStatus($('status'), `Analyzing "${keyword}" with Gemini…`);
+        const r = await send('ANALYZE_NICHE', { keyword, market });
+        openDetailDrawer(keyword, { market, analysis: r });
+        break;
+      }
+      case 'legal':
+        await send('CHECK_TRADEMARK', { keyword, market });
+        openDetailDrawer(keyword, { market, legalRequested: true });
+        break;
+      case 'scrape':
+        await send('SCRAPE_KEYWORD', { keyword, market });
+        showStatus($('status'), `Queued scrape for "${keyword}".`);
+        break;
+      case 'delete':
+        await send('DELETE_KEYWORD', { keyword, market });
+        refreshKeywords();
+        showStatus($('status'), `Deleted "${keyword}".`);
+        break;
+    }
+  } catch (err) {
+    showStatus($('status'), err.message, true);
+  }
 }
 
-function fmtPct(v) {
-  return v == null ? '—' : `${(Number(v) * 100).toFixed(0)}%`;
+// ---------------------------------------------------------------------------
+// Events
+// ---------------------------------------------------------------------------
+
+export function bind() {
+  $('go-btn').addEventListener('click', handleExpand);
+  $('export-btn').addEventListener('click', exportCsv);
+  $('refresh-btn').addEventListener('click', refreshKeywords);
+  $('start-over-btn').addEventListener('click', handleStartOver);
+  $('format-select').addEventListener('change', () => {
+    persistFormatFilter().then(() =>
+      showStatus($('status'), $('format-select').value
+        ? `Format filter set to ${$('format-select').value} — applies to new scrapes.`
+        : 'Format filter cleared — all formats.')
+    );
+  });
+  $('pause-btn').addEventListener('click', () => {
+    if (queueSnapshot.idle) return;
+    if (queueSnapshot.paused) {
+      send('RESUME_QUEUE');
+    } else {
+      send('PAUSE_QUEUE');
+    }
+  });
+
+  $('seed-input').addEventListener('keydown', (e) => {
+    if (e.key === 'Enter') handleExpand();
+  });
+
+  $('keywords-body').addEventListener('click', (e) => {
+    const link = e.target.closest('a');
+    if (!link) return;
+    e.preventDefault();
+    const tr = link.closest('tr');
+    if (!tr) return;
+    const keyword = tr.dataset.keyword;
+    if (link.classList.contains('kw-detail')) {
+      openDetailDrawer(keyword, {});
+    } else if (link.classList.contains('af-link')) {
+      handleRowAction(keyword, link.dataset.act);
+    }
+  });
+
+  document.querySelectorAll('th.sortable').forEach((th) => {
+    th.addEventListener('click', () => {
+      const key = th.dataset.sort;
+      if (sortState.key === key) {
+        sortState.dir = sortState.dir === 'asc' ? 'desc' : 'asc';
+      } else {
+        sortState.key = key;
+        sortState.dir = key === 'competition' ? 'asc' : 'desc';
+      }
+      document.querySelectorAll('th.sortable').forEach((t) => {
+        t.classList.toggle('asc', t === th && sortState.dir === 'asc');
+        t.classList.toggle('desc', t === th && sortState.dir === 'desc');
+      });
+      renderTable();
+    });
+  });
+
+  pollQueue();
+  pollKeywordUpdates();
 }
 
-function fmtSales(v) {
-  return v == null ? '—' : `~${Number(v).toLocaleString()}/mo`;
+// ---------------------------------------------------------------------------
+// Live updates
+// ---------------------------------------------------------------------------
+
+export function onQueueProgress(snapshot) {
+  if (!snapshot) return;
+  if (typeof snapshot.size === 'number' || typeof snapshot.pending === 'number') {
+    queueSnapshot = { ...queueSnapshot, ...snapshot };
+    if (snapshot.idle) queueSnapshot.pipelineText = '';
+  } else if (snapshot.pipelineText) {
+    queueSnapshot.pipelineText = snapshot.pipelineText;
+  }
+  renderQueueBar();
 }
 
-function fmtDate(ts) {
-  return ts ? new Date(ts).toLocaleDateString() : '—';
+function renderQueueBar() {
+  const stage = queueSnapshot.stage ?? 'idle';
+  const pending = queueSnapshot.pending ?? 0;
+  const completed = queueSnapshot.completed ?? 0;
+  const failed = queueSnapshot.failed ?? 0;
+  const size = queueSnapshot.size ?? 0;
+  const idle = !!queueSnapshot.idle;
+  const paused = !!queueSnapshot.paused;
+  const pipelineText = queueSnapshot.pipelineText;
+  const done = (completed || 0) + (failed || 0);
+  const total = size || 0;
+  const pct = total ? Math.min(100, Math.round((done / total) * 100)) : 0;
+
+  const stageText =
+    stage === 'serp' ? 'scraping search results' :
+    stage === 'enrichment' ? 'enriching BSR (product pages)' :
+    stage === 'discovery' ? 'discovering' :
+    'idle';
+
+  $('queue-status').textContent = idle
+    ? 'Idle'
+    : paused
+      ? `${pipelineText ? pipelineText + ' · ' : ''}⏸ Paused — ${total} remaining`
+      : pipelineText
+        ? `${pipelineText} · ${pending}/${total} remaining`
+        : `${pending}/${total} remaining · ${stageText} · ${failed} failed`;
+  $('queue-fill').style.width = `${pct}%`;
+  $('queue-status').classList.toggle('muted', idle);
+
+  const btn = $('pause-btn');
+  btn.textContent = paused ? 'Resume' : 'Pause';
+  btn.style.opacity = idle ? '0.4' : '1';
 }
 
-function escapeHtml(s) {
-  return String(s).replace(/[&<>"']/g, (c) => ({
-    '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;'
-  }[c]));
+async function pollQueue() {
+  try {
+    const s = await send('QUEUE_STATUS');
+    queueSnapshot = { ...queueSnapshot, ...s };
+  } catch {}
+  renderQueueBar();
+  setTimeout(pollQueue, 2000);
 }
 
-function escapeAttr(s) {
-  return escapeHtml(s);
+async function pollKeywordUpdates() {
+  try {
+    const fresh = await send('GET_KEYWORDS');
+    const dirty = JSON.stringify(fresh.map((k) => [k.keyword, k.score, k.metrics && k.metrics.bestSubcategoryBsr, k.metrics && k.metrics.bsrSamples && k.metrics.bsrSamples.length]).map((x) => x.join('|')).join('\n'));
+    const prev = JSON.stringify(allKeywords.map((k) => [k.keyword, k.score, k.metrics && k.metrics.bestSubcategoryBsr, k.metrics && k.metrics.bsrSamples && k.metrics.bsrSamples.length].map((x) => x.join('|')).join('\n')));
+    if (dirty !== prev) {
+      allKeywords = fresh;
+      renderTable();
+    }
+  } catch {}
+  setTimeout(pollKeywordUpdates, 4000);
 }
+
+bind();

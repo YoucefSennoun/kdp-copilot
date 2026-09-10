@@ -2,13 +2,45 @@ const ENDPOINT = 'https://generativelanguage.googleapis.com/v1beta/models';
 const DEFAULT_MODEL = 'gemini-3.6-flash';
 const MAX_OUTPUT_TOKENS = 4096;
 
+import { classifyContentType } from '../lib/content-type.js';
+
+// Phase 0 hygiene: the old list included fully-retired (`gemini-1.5-flash`)
+// and soon-to-be-shutdown (`gemini-2.5-pro`) models. Keep only live, current
+// generation defaults. `fetchModelChoices()` tries Google's live model list
+// first and falls back to this static list when unavailable.
 export const MODEL_CHOICES = [
   { id: 'gemini-3.6-flash', label: 'Gemini 3.6 Flash (fast, cheap)' },
   { id: 'gemini-3.6-flash-lite', label: 'Gemini 3.6 Flash-Lite (cheapest)' },
-  { id: 'gemini-2.5-flash', label: 'Gemini 2.5 Flash (previous gen)' },
-  { id: 'gemini-2.5-pro', label: 'Gemini 2.5 Pro (highest quality)' },
-  { id: 'gemini-1.5-flash', label: 'Gemini 1.5 Flash (legacy)' }
+  { id: 'gemini-3.6-pro', label: 'Gemini 3.6 Pro (highest quality)' }
 ];
+
+const MODEL_LIST_URL = 'https://generativelanguage.googleapis.com/v1beta/models';
+
+export async function fetchModelChoices() {
+  const apiKey = await getApiKey();
+  if (!apiKey) return MODEL_CHOICES;
+  try {
+    const res = await fetch(`${MODEL_LIST_URL}?key=${encodeURIComponent(apiKey)}&pageSize=100`);
+    if (!res.ok) return MODEL_CHOICES;
+    const data = await res.json();
+    const flash = (data.models || [])
+      .filter((mm) => /flash|lite/i.test(mm.name) && /generateContent/.test(mm.supportedGenerationMethods?.join(',') || ''))
+      .map((mm) => {
+        const id = mm.name.split('/').pop();
+        const pretty = id.replace(/[-_]/g, ' ');
+        return { id, label: `Gemini ${pretty} (live)` };
+      });
+    if (!flash.length) return MODEL_CHOICES;
+    // De-duplicate against known defaults by exact id.
+    const merged = [...MODEL_CHOICES];
+    flash.forEach((f) => {
+      if (!merged.some((m) => m.id === f.id)) merged.push(f);
+    });
+    return merged.slice(0, 12);
+  } catch {
+    return MODEL_CHOICES;
+  }
+}
 
 export async function getApiKey() {
   const { kdpSettings } = await chrome.storage.local.get(['kdpSettings']);
@@ -80,12 +112,71 @@ async function callGemini({ apiKey, model = DEFAULT_MODEL, systemInstruction, pr
 // 1. Niche expansion: seed -> adjacent low-competition book concepts
 // ---------------------------------------------------------------------------
 
-function buildExpansionPrompt(seed, market, count) {
+function buildExpansionPrompt(seed, market, count, scope = 'rule8') {
+  const scopeRules = scope === 'strict'
+    ? [
+        `SCOPE: STRICT LOW-CONTENT ONLY (Amazon's official "generally low-content" definition).`,
+        `You must ONLY propose BLANK-INTERIOR book families:`,
+        `- notebooks (dot grid, composition, lined)`,
+        `- planners (weekly, monthly, meal, budget, class/trip/planner)`,
+        `- diaries and journals (plain, gratitude, manifestation, prompt journals)`,
+        `- log / tracking books (habit, workout, food, reading, sleep, symptom, activity logs; thankfulness trackers)`,
+        `- coupon books`,
+        `- score card templates (sports scorecards, score sheets, game tracking)`,
+        `- crafting templates (scrapbook paper, ephemera, card-making, stencils)`,
+        `- blank sheet music / manuscript / staff paper`,
+        `- personalized/name-variant blank books (e.g. "for a girl named…")`,
+        `Forbidden in this scope (they are NOT "generally low-content" per Amazon): novels, fiction, non-fiction prose,`,
+        `coloring books, puzzle/activity books, workbooks, photography books, printed sheet music, manuals, textbooks, children's story books.`,
+        `If a niche is not one of the allowed blank-interior families, do NOT propose it at all.`
+      ]
+    : scope === 'rule8'
+      ? [
+          `SCOPE: RULES-v1 PUBLISHABLE LIST (low-content PLUS the "Not Generally Low-Content" families).`,
+          `You must ONLY propose niches from these families:`,
+          `- LOW-CONTENT: notebooks, planners, diaries/journals, prompt journals, log books (habit, activity, thankfulness tracking),`,
+          `  coupon books, score card templates, crafting templates (scrapbook paper, ephemera), blank sheet music (manuscript/staff paper)`,
+          `- PUZZLE BOOKS: crosswords, word search, sudoku, logic puzzles, mazes, cryptograms, dot-to-dot`,
+          `- COLORING BOOKS: adult and kids coloring, color-by-number, activity coloring`,
+          `- PHOTOGRAPHY BOOKS: photo books with captions (coffee-table style compilations an indie can assemble)`,
+          `- SHEET MUSIC: published music notation books`,
+          `- MANUALS: practical how-to manuals an indie can write (user guides, workflow manuals)`,
+          `- TEXTBOOKS: educational workbooks/textbooks a subject-capable indie can write (math practice, language learning)`,
+          `- CHILDREN'S BOOKS: picture books, early readers, chapter books, board books`,
+          `Forbidden in this scope: novels, fiction, memoirs, biographies, non-fiction prose, expertise-required clinical/legal/academic works.`,
+          `If a niche is not on the allowed list, do NOT propose it at all.`
+        ]
+      : [
+          `SCOPE: STANDARD KDP-FRIENDLY (low-content + production-ready content).`,
+          `ONLY propose niches whose physical book an indie can create without specialist credentials:`,
+          `- low-content: journals, diaries, planners, notebooks, logbooks, trackers, calendars, gratitude/prompt books, guest books, coupon books, score cards, crafting templates, blank sheet music`,
+          `- medium-content: coloring books, activity books, puzzle books (crosswords, word search, sudoku, mazes), workbooks, practice/handwriting books, flash cards`,
+          `- personalized/name-variant books (e.g. "for a girl named…")`,
+          `- researched-and-compiled guides: checklists, templates, curated how-to compilations, recipe collections, beginner guides a layperson can compile`,
+          `- NARROW FICTION niches (optional): only when the niche names a specific sub-genre AND a concrete audience/setting (e.g. "cozy mysteries for seniors", "chapter books for girls 6-8"). Generic "novels", "romance", "fiction" broad terms are NEVER acceptable.`
+        ];
   return [
     `Act as a senior Amazon KDP (Kindle Direct Publishing) niche research strategist.`,
     `Given the seed niche "${seed}" for the ${market.label} Amazon marketplace,`,
-    `propose ${count} ADJACENT, low-to-mid competition book niches an independent author can actually win.`,
+    `propose ${count} ADJACENT, low-to-mid competition book niches an independent publisher can ACTUALLY produce.`,
+    ...scopeRules,
+    `NEVER propose memoirs, biographies, essays, short-story anthologies, poetry, or expertise-required textbooks/clinical/scientific/legal/academic works.`,
+    scope !== 'strict'
+      ? `Never propose books whose subject is BECOMING a writer or self-publishing (e.g. "how to write a book", "book marketing for authors") -- those sell to authors, not to niche buyers. A planner/journal/workbook FOR that audience is fine ("novel writing planner").`
+      : `Never propose books whose subject is BECOMING a writer or self-publishing -- they are non-fiction prose, outside this scope.`,
+    scope !== 'strict'
+      ? `A health-adjacent niche is allowed ONLY in its compiled/lay form (e.g. "diabetes-friendly recipes", "first-trimester guide") -- never clinical reference material.`
+      : `A health-adjacent niche is allowed ONLY as a blank log/journal/planner (e.g. "diabetes logbook", "meal planner") -- never clinical reference or prose.`,
     `Prefer long-tail keywords with real buyer intent over broad head terms.`,
+    ``,
+    `CRITICAL RULE -- never suggest an existing book. If a keyword is the exact or near-exact title of a real, previously published, identifiable book you recognize, set "isExistingTitle": true. Existing titles are useless niches. Examples of EXISTING BOOKS you must NOT propose:`,
+    `- "The Intelligent Investor" (Benjamin Graham finance classic)`,
+    `- "Antifragile" (Nassim Taleb essay)`,
+    `- "Principles: Life and Work" (Ray Dalio)`,
+    `- "The Runaway Bunny" (children's picture book)`,
+    `- "How Countries Go Broke" (published finance title)`,
+    `If you recognize a keyword as a published book title, refuse it with "isExistingTitle": true rather than inventing a claim about it.`,
+    ``,
     `Return JSON exactly in this shape:`,
     JSON.stringify({
       niches: [
@@ -95,7 +186,9 @@ function buildExpansionPrompt(seed, market, count) {
           formats: ['paperback', 'kindle'],
           why: 'one sentence on why this niche is winnable',
           titleIdea: 'a marketable book title that hits this keyword',
-          demandSignal: 'low | medium | high'
+          demandSignal: 'low | medium | high',
+          contentType: scope === 'strict' ? 'low-content' : 'low-content | medium-content | personalized | guide | fiction-niche',
+          isExistingTitle: false
         }
       ]
     }),
@@ -103,12 +196,37 @@ function buildExpansionPrompt(seed, market, count) {
   ].join('\n');
 }
 
-export async function expandNicheSeeds({ apiKey, seed, market, count = 10 }) {
-  const prompt = buildExpansionPrompt(seed, market, count);
+export async function expandNicheSeeds({ apiKey, seed, market, count = 10, allowFiction = true, scope = 'rule8' }) {
+  const prompt = buildExpansionPrompt(seed, market, count, scope);
   const data = await callGemini({ apiKey, prompt });
   const niches = Array.isArray(data) ? data : data?.niches;
   if (!Array.isArray(niches)) throw new Error('Model response missing "niches" array.');
-  return niches.slice(0, count);
+  return niches
+    .filter((s) => isSuggestibleSuggestion(s, { allowFiction, scope }))
+    .slice(0, count);
+}
+
+/**
+ * Synchronous gate right after generation (Revision 2, Gap F / Bug 1).
+ * Rejects suggestions the model itself flagged as existing titles, engine
+ * suggestions that trip the high-content classifier, and phrasing tells that
+ * indicate a real book ("by <Author>", "bestseller", "classic").
+ */
+export function isSuggestibleSuggestion(s = {}, { allowFiction = true, scope = 'rule8' } = {}) {
+  if (s.isExistingTitle === true) return false;
+
+  const keyword = String(s.keyword || '').trim();
+  const titleIdea = String(s.titleIdea || '').trim();
+  const ct = classifyContentType({ keyword: `${keyword} ${titleIdea}`.trim(), allowFiction, scope });
+  if (ct.contentType === 'high-content-excluded') return false;
+
+  const why = String(s.why || '');
+  const category = String(s.category || '');
+  const tells = ` ${why} ${category}`.toLowerCase();
+  if (/by [a-z]+ [a-z]+/.test(tells)) return false;            // "by Warren Buffett"
+  if (/\bbestseller\b/.test(tells)) return false;
+  if (/\bclassic\b/.test(tells)) return false;
+  return true;
 }
 
 // ---------------------------------------------------------------------------
@@ -132,12 +250,17 @@ function buildAnalysisPrompt(keyword, keywordRecord) {
   const facts = {
     keyword,
     market: keywordRecord.market || 'us',
-    listings: m.listingCount ?? null,
+    totalResults: m.totalResultsCount ?? null,
+    resultsAreApprox: m.resultsCountIsApprox ?? false,
+    sampleSize: m.sampleSize ?? m.listingCount ?? null,
+    distinctTitles: m.distinctTitleCount ?? null,
     avgPrice: m.avgPrice ?? null,
     priceRange: [m.lowPrice ?? null, m.highPrice ?? null],
     totalReviews: m.totalReviews ?? null,
     avgRating: m.avgRating ?? null,
     medianBsr: m.medianRank ?? m.avgBsr ?? null,
+    bestSubcategoryBsr: m.bestSubcategoryBsr ?? null,
+    interestProxy: m.demandProxyScore ?? null,
     estimatedMonthlySales: m.estimatedMonthlySales ?? null,
     topConcentration: m.topConcentration ?? null,
     kindleShare: m.kindleShare ?? null,
@@ -151,6 +274,7 @@ function buildAnalysisPrompt(keyword, keywordRecord) {
     JSON.stringify(facts, null, 2),
     `Top listings (sample):`,
     JSON.stringify(sample, null, 2),
+    `"totalResults" is the true Amazon result count; "interestProxy" is a transparent 0-100 proxy for search interest, NOT a verified monthly-search number.`,
     `Return JSON exactly in this shape:`,
     JSON.stringify({
       oneLineRead: 'verdict sentence for an indie author',
@@ -203,126 +327,68 @@ export async function generateListing({ apiKey, niche, keywordRecord }) {
 }
 
 // ---------------------------------------------------------------------------
-// 4. Trademark & copyright screen: does this niche collide with protected IP?
+// 4. Trademark & copyright screen: multi-market sweep (rules v1, rule 5)
 // ---------------------------------------------------------------------------
 
-function buildLegalPrompt(keyword, keywordRecord) {
+function buildLegalPrompt(keyword, keywordRecord, markets) {
   const leader = (keywordRecord?.metrics?.sample || keywordRecord?.sample || [])[0];
+  const marketList = (markets && markets.length ? markets : ['us']).join(', ').toUpperCase();
   return [
     `You are an Amazon KDP compliance advisor for indie authors. Analyze the niche "${keyword}"`,
-    `for potential US trademark and copyright problems a self-publisher could face.`,
-    `Look for: registered brands used generically, movie/TV/game characters, franchise names,`,
-    `celebrity names, artist/song titles, publisher brands, or phrases protected by famous marks.`,
+    `for trademark and copyright problems a self-publisher could face in EACH of these marketplaces: ${marketList}.`,
+    `For every market, check: registered brands used generically, movie/TV/game characters, franchise names,`,
+    `celebrity names, artist/song titles, publisher brands, and phrases protected by famous marks — with special`,
+    `attention to trademark Class 16 (printed matter / books), because that is the class a book title lives in.`,
+    `Consider that protection is territorial: a mark may be registered in one market but not another.`,
     leader ? `A top listing in this niche is "${leader.title}".` : '',
     `Return JSON exactly in this shape:`,
     JSON.stringify({
-      risk: 'low | medium | high',
+      risk: 'overall risk: low | medium | high (worst across markets)',
       safe: true,
       verdict: 'one-sentence plain-English explanation a non-lawyer can act on',
+      perMarket: {
+        us: {
+          risk: 'low | medium | high',
+          verdict: 'one-sentence market-specific note'
+        }
+      },
       flagged: [
         {
           term: 'the specific word/phrase that is risky',
           type: 'trademark | copyright | celebrity | franchise | brand',
           owner: 'who you think owns the rights, if known',
+          markets: ['market codes where this is risky, e.g. "us", "jp"'],
           why: 'why publishing a book on this could be a problem'
         }
       ],
       safeKeyword: 'a reworded, compliant alternative niche targeting the same buyer intent',
       notes: ['2-3 practical actions or caveats']
     }),
-    `An empty "flagged" array means the niche looks clean. Only output the JSON object.`
+    `"perMarket" must contain an entry for every marketplace listed above. An empty "flagged" array means the niche looks clean. Only output the JSON object.`
   ].filter(Boolean).join('\n');
 }
 
-export async function checkTrademark({ apiKey, keyword, keywordRecord }) {
-  const prompt = buildLegalPrompt(keyword, keywordRecord);
+export async function checkTrademark({ apiKey, keyword, keywordRecord, markets }) {
+  const prompt = buildLegalPrompt(keyword, keywordRecord, markets);
   const data = await callGemini({ apiKey, prompt });
-  return { ...data, ai: true, keyword };
+  return { ...data, ai: true, keyword, markets: markets || [] };
 }
 
-// Keyless fallback: a small, conservative list of widely protected terms.
-// NOT a legal database — it only catches obvious collisions.
-const PROTECTED_TERMS = [
-  { term: 'disney', type: 'trademark', owner: 'The Walt Disney Company' },
-  { term: 'pixar', type: 'trademark', owner: 'Pixar / Disney' },
-  { term: 'marvel', type: 'trademark', owner: 'Marvel Entertainment' },
-  { term: 'dc comics', type: 'trademark', owner: 'DC Comics' },
-  { term: 'harry potter', type: 'trademark', owner: 'J.K. Rowling / Warner Bros.' },
-  { term: 'pokemon', type: 'trademark', owner: 'The Pokémon Company' },
-  { term: 'star wars', type: 'trademark', owner: 'Lucasfilm / Disney' },
-  { term: 'star trek', type: 'trademark', owner: 'Paramount' },
-  { term: 'lego', type: 'trademark', owner: 'LEGO Group' },
-  { term: 'barbie', type: 'trademark', owner: 'Mattel' },
-  { term: 'netflix', type: 'trademark', owner: 'Netflix Inc.' },
-  { term: 'nike', type: 'trademark', owner: 'Nike Inc.' },
-  { term: 'adidas', type: 'trademark', owner: 'adidas AG' },
-  { term: 'coca-cola', type: 'trademark', owner: 'The Coca-Cola Company' },
-  { term: 'mcdonald', type: 'trademark', owner: 'McDonald\'s Corp.' },
-  { term: 'starbucks', type: 'trademark', owner: 'Starbucks Corp.' },
-  { term: 'apple', type: 'trademark', owner: 'Apple Inc.' },
-  { term: 'google', type: 'trademark', owner: 'Google LLC' },
-  { term: 'microsoft', type: 'trademark', owner: 'Microsoft Corp.' },
-  { term: 'amazon prime', type: 'trademark', owner: 'Amazon.com Inc.' },
-  { term: 'game of thrones', type: 'copyright', owner: 'George R.R. Martin / HBO' },
-  { term: 'lord of the rings', type: 'trademark', owner: 'The Tolkien Estate / Middle-earth Enterprises' },
-  { term: 'the hobbit', type: 'trademark', owner: 'The Tolkien Estate' },
-  { term: 'sherlock holmes', type: 'copyright', owner: 'Conan Doyle Estate (US, until 2049)' },
-  { term: 'doctor who', type: 'trademark', owner: 'BBC' },
-  { term: 'halo', type: 'trademark', owner: 'Microsoft / 343 Industries' },
-  { term: 'minecraft', type: 'trademark', owner: 'Mojang / Microsoft' },
-  { term: 'fortnite', type: 'trademark', owner: 'Epic Games' },
-  { term: 'roblox', type: 'trademark', owner: 'Roblox Corp.' },
-  { term: 'mario', type: 'trademark', owner: 'Nintendo' },
-  { term: 'zelda', type: 'trademark', owner: 'Nintendo' },
-  { term: 'super mario', type: 'trademark', owner: 'Nintendo' },
-  { term: 'sonic the hedgehog', type: 'trademark', owner: 'Sega' },
-  { term: 'peppa pig', type: 'trademark', owner: 'Hasbro / Entertainment One' },
-  { term: 'bluey', type: 'trademark', owner: 'BBC Studios' },
-  { term: 'paw patrol', type: 'trademark', owner: 'Spin Master / Nickelodeon' },
-  { term: 'elsa', type: 'trademark', owner: 'Disney (Frozen)' },
-  { term: 'frozen', type: 'trademark', owner: 'Disney' },
-  { term: 'spiderman', type: 'trademark', owner: 'Marvel / Sony' },
-  { term: 'batman', type: 'trademark', owner: 'DC / Warner Bros.' },
-  { term: 'superman', type: 'trademark', owner: 'DC / Warner Bros.' },
-  { term: 'wonka', type: 'trademark', owner: 'Roald Dahl Estate / Warner Bros.' },
-  { term: 'dr. seuss', type: 'trademark', owner: 'Dr. Seuss Enterprises' },
-  { term: 'eric carle', type: 'copyright', owner: 'Eric Carle Estate' },
-  { term: 'cocomelon', type: 'trademark', owner: 'Moonbug Entertainment' },
-  { term: 'kanye', type: 'celebrity', owner: 'Kanye West' },
-  { term: 'taylor swift', type: 'celebrity', owner: 'Taylor Swift' },
-  { term: 'beyonce', type: 'celebrity', owner: 'Beyoncé Knowles-Carter' },
-  { term: 'rihanna', type: 'celebrity', owner: 'Rihanna' },
-  { term: 'the beatles', type: 'trademark', owner: 'Apple Corps / Sony' }
-];
+// Keyless multi-market fallback (rules v1, rule 5): local famous-marks screen
+// from lib/trademark-registry.js — global + per-market term lists, plus the
+// registry deep links so the user can verify in official databases.
+import { localTrademarkScreen } from '../lib/trademark-registry.js';
 
-export async function localTrademarkSweep(keyword, keywordRecord) {
-  const text = `${keywordRecord?.title || keyword} ${keywordRecord?.description || ''} ${keyword}`.toLowerCase();
-  const flagged = PROTECTED_TERMS.filter((p) => text.includes(p.term))
-    .map((p) => ({ term: p.term, type: p.type, owner: p.owner, why: `The niche contains the protected name "${p.term}".` }))
-    .slice(0, 8);
-
-  if (flagged.length) {
-    return {
-      keyword,
-      ai: false,
-      risk: flagged.length > 2 ? 'high' : 'medium',
-      safe: false,
-      verdict: `Heuristic screen (no API key): flagged ${flagged.length} protected term${flagged.length === 1 ? '' : 's'}. Verify with a trademark attorney before publishing.`,
-      flagged,
-      safeKeyword: keyword,
-      notes: ['This is a local keyword-match check, not a legal opinion. Add your Gemini API key for a full AI review.']
-    };
-  }
-  return {
-    keyword,
-    ai: false,
-    risk: 'low',
-    safe: true,
-    verdict: 'Heuristic screen (no API key): no common protected terms found in the keyword. Review with AI for complete safety.',
-    flagged: [],
-    safeKeyword: keyword,
-    notes: ['Add your Gemini API key in Settings for a thorough AI trademark and copyright review.']
-  };
+export async function localTrademarkSweep(keyword, keywordRecord, markets) {
+  const leader = (keywordRecord?.metrics?.sample || keywordRecord?.sample || [])[0];
+  const scan = localTrademarkScreen(keyword, markets, leader ? leader.title : '');
+  scan.ai = false;
+  scan.market = keywordRecord?.market || 'us';
+  scan.notes = [
+    'Local multi-market screen, not a legal opinion. Use the per-market registry links for official records.',
+    'Add your Gemini API key in Settings for a thorough AI trademark and copyright review.'
+  ];
+  return scan;
 }
 
 // ---------------------------------------------------------------------------
@@ -349,7 +415,7 @@ function matchesSeed(seed, word) {
  * Expand beyond a seed using real Amazon + Google autocomplete data.
  * Builds an "alphabet soup" style set of adjacent commercial search terms.
  */
-export async function localExpandSuggestions({ amazonWords, googleWords, seed }) {
+export async function localExpandSuggestions({ amazonWords, googleWords, seed, allowFiction = true, scope = 'rule8' }) {
   const seen = new Set();
   const out = [];
 
@@ -359,7 +425,7 @@ export async function localExpandSuggestions({ amazonWords, googleWords, seed })
     if (clean === (seed || '').trim().toLowerCase()) return;
     if (matchesSeed(seed, clean)) {
       seen.add(clean);
-      out.push({ keyword: clean, source, score: computeSuggestionRelevance(clean, seed) });
+      out.push({ keyword: clean, source, score: computeSuggestionRelevance(clean, seed, allowFiction, scope) });
     }
   };
 
@@ -371,7 +437,12 @@ export async function localExpandSuggestions({ amazonWords, googleWords, seed })
     .slice(0, 30);
 }
 
-function computeSuggestionRelevance(word, seed) {
+/**
+ * 0-1 relevance of an autocomplete term to its seed. Weighted by shared words,
+ * long-tail length, and commercial-intent markers. Used to rank suggestions
+ * AND to persist a per-keyword "interest proxy" weight (Phase 3).
+ */
+export function computeSuggestionRelevance(word, seed, allowFiction = true, scope = 'rule8') {
   const seedParts = (seed || '').toLowerCase().trim().split(/\s+/).filter(Boolean);
   const wParts = word.split(/\s+/);
   const shared = wParts.filter((p) => seedParts.includes(p)).length;
@@ -381,6 +452,22 @@ function computeSuggestionRelevance(word, seed) {
   if (wParts.length >= 3 && wParts.length <= 6) score += 0.25;
   if (wParts.length > 7) score -= 0.2;
   if (/free|pdf|download|printable/i.test(word)) score -= 0.15; // low-commercial intent books
+
+  // Phase 1.5: deprioritize high-content suggestions an indie cannot produce.
+  // In strict scope only blank-interior families survive, so give the
+  // confirmed low-content families the bonus and push everything else down.
+  const ct = classifyContentType({ keyword: word, allowFiction, scope });
+  if (ct.contentType === 'high-content-excluded') score -= 0.35;
+  else if (ct.contentType === 'low-content') score += 0.15;
+  else if (ct.contentType !== 'unknown') score += 0.05;
+
+  // Revision 2: explicit tells the classifier's phrase list can miss when the
+  // token is glued to punctuation/case the signals don't cover. Fiction-word
+  // penalties are left to the classifier so allowed narrow-fiction niches
+  // aren't double-penalized.
+  if (/\b(clinical|diagnos|patholog|textbook|dissertation|thesis)\w*/i.test(word)) score -= 0.1;
+  if (/\b(m\.?d\.?|ph\.?d\.?|esq\.?|m d|ph d)\b/i.test(word)) score -= 0.1;
+
   if (/book|cookbook|guide|workbook|journal|planner|for\s+\w+/i.test(word)) score += 0.1;
   return Math.max(0.1, Math.min(1.2, score));
 }

@@ -7,7 +7,8 @@ export const SCORE_WEIGHTS = {
 const NORMALIZE_MAX = {
   reviewCount: 2000,
   bsr: 50000,
-  listingCount: 200,
+  listingCount: 200,        // legacy alias; normalized sample size
+  totalResultsCount: 10000, // Amazon's real total-result distribution for Books
   price: 20
 };
 
@@ -34,10 +35,27 @@ function median(arr, fn) {
   return vals.length % 2 ? vals[mid] : (vals[mid - 1] + vals[mid]) / 2;
 }
 
+function normalizeTitle(title) {
+  return String(title || '').toLowerCase().replace(/[^a-z0-9]+/g, ' ').trim();
+}
+
+/**
+ * Amazon SERPs show one card per format (hardcover / paperback / Kindle /
+ * audiobook) for what is really a single title. Count how many *actual books*
+ * the sample represents by deduping on normalized title.
+ */
+export function computeDistinctTitleCount(listings = []) {
+  const seen = new Set();
+  listings.forEach((l) => {
+    const key = normalizeTitle(l.title);
+    if (key) seen.add(key);
+  });
+  return seen.size;
+}
+
 /**
  * Rating of how "reinforced" the top of the niche is: what share of the
- * top listings carry serious review moats. Mirrors Productor's rank-percent
- * "average quality of the top results" signal.
+ * top listings carry serious review moats.
  */
 export function computeTopConcentration(listings = []) {
   if (!listings.length) return 0;
@@ -48,16 +66,21 @@ export function computeTopConcentration(listings = []) {
 export function computeListingsStats(listings = []) {
   const ranks = listings.map((l) => l.bsr).filter((v) => v != null);
   const medRank = median(ranks);
+  const totalReviews = listings.reduce((a, l) => a + (l.reviewCount || 0), 0);
+  const topReviews = Math.max(...listings.map((l) => l.reviewCount || 0));
   return {
     listingCount: listings.length,
+    sampleSize: listings.length,
+    distinctTitleCount: computeDistinctTitleCount(listings),
     avgPrice: avg(listings, (l) => l.price),
     lowPrice: Math.min(...listings.map((l) => l.price).filter((v) => v != null)),
     highPrice: Math.max(...listings.map((l) => l.price).filter((v) => v != null)),
     avgReviewCount: avg(listings, (l) => l.reviewCount),
-    highReviews: Math.max(...listings.map((l) => l.reviewCount || 0)),
+    highReviews: topReviews,
     lowReviews: Math.min(...listings.map((l) => l.reviewCount || 0)),
     avgRating: avg(listings, (l) => l.avgRating),
-    totalReviews: listings.reduce((a, l) => a + (l.reviewCount || 0), 0),
+    totalReviews,
+    leaderDominanceRatio: totalReviews > 0 ? clamp(topReviews / totalReviews, 0, 1) : null,
     avgBsr: avg(ranks),
     medianRank: medRank,
     medianRankBelow: medRank != null ? median(ranks.filter((r) => r > medRank)) : null,
@@ -68,9 +91,53 @@ export function computeListingsStats(listings = []) {
   };
 }
 
+function isTopLevelRank(category) {
+  const c = (category || '').toLowerCase().trim();
+  return c === 'books' || /^(kindle store|audible|prime video)\b/.test(c);
+}
+
+/**
+ * BSR enrichment aggregation (Phase 2). Each sample: { asin, bsr, bsrCategory,
+ * allRanks[] }. bestSubcategoryBsr = the lowest sub-category rank across the
+ * enriched subset ("< 200" criterion). medianRank = median overall Books rank
+ * (used for the sales heuristic).
+ */
+export function computeBsrStats(bsrSamples = [], sampleSize = 0) {
+  const withRank = (bsrSamples || []).filter((s) => s && s.bsr != null);
+  if (!withRank.length) {
+    return { bestSubcategoryBsr: null, medianRank: null, bsrCoverage: 0, bsrSamples: [] };
+  }
+
+  const perSample = withRank.map((s) => {
+    const ranks = Array.isArray(s.allRanks) ? s.allRanks : [];
+    const subRanks = ranks.filter((r) => r && r.rank != null && !isTopLevelRank(r.category));
+    const bestRank = subRanks.length
+      ? Math.min(...subRanks.map((r) => r.rank))
+      : ranks.length
+        ? Math.min(...ranks.map((r) => r.rank))
+        : s.bsr;
+    return { ...s, bestRank };
+  });
+
+  const overall = perSample.map((s) => s.bsr).sort((a, b) => a - b);
+  const mid = Math.floor(overall.length / 2);
+  const medianRank = overall.length % 2
+    ? overall[mid]
+    : (overall[mid - 1] + overall[mid]) / 2;
+
+  const coverageDenom = sampleSize > 0 ? sampleSize : perSample.length;
+  const bsrCoverage = clamp(perSample.length / coverageDenom, 0, 1);
+
+  return {
+    bestSubcategoryBsr: Math.min(...perSample.map((s) => s.bestRank)),
+    medianRank,
+    bsrCoverage,
+    bsrSamples: perSample
+  };
+}
+
 /**
  * Rough monthly unit estimate for a book niche from its median BSR.
- * Heuristic: demand decays roughly inverse to rank in the Books category.
  */
 export function estimateMonthlySales(bsr) {
   if (bsr == null || bsr <= 0) return null;
@@ -79,15 +146,23 @@ export function estimateMonthlySales(bsr) {
 
 export function computeDemand(metrics = {}) {
   const reviewFactor = normalize(metrics.totalReviews ?? metrics.reviewCount, NORMALIZE_MAX.reviewCount);
-  const bsr = metrics.medianRank ?? metrics.avgBsr ?? metrics.bsr;
+  const bsr = metrics.bestSubcategoryBsr ?? metrics.medianRank ?? metrics.avgBsr ?? metrics.bsr;
   const bsrFactor = bsr != null ? 1 - normalize(bsr, NORMALIZE_MAX.bsr) : 0.5;
   const ratingFactor = metrics.avgRating ? clamp(metrics.avgRating / 5, 0, 1) : 0.5;
-  const demand = reviewFactor * 0.4 + bsrFactor * 0.4 + ratingFactor * 0.2;
+  const proxyFactor = metrics.demandProxyScore != null
+    ? clamp(metrics.demandProxyScore / 100, 0, 1)
+    : 0.5;
+  const demand = reviewFactor * 0.2 + bsrFactor * 0.3 + ratingFactor * 0.1 + proxyFactor * 0.4;
   return clamp(demand, 0, 1);
 }
 
 export function computeCompetition(metrics = {}) {
-  const listingFactor = normalize(metrics.listingCount, NORMALIZE_MAX.listingCount);
+  // True Amazon result count (Gap A fix) is the primary competition-volume
+  // signal. The ≤48-card sample size is only a fallback when it is missing.
+  const total = metrics.totalResultsCount;
+  const listingFactor = total != null
+    ? normalize(total, NORMALIZE_MAX.totalResultsCount)
+    : normalize(metrics.sampleSize ?? metrics.listingCount, NORMALIZE_MAX.listingCount);
   const reviewFactor = normalize(metrics.totalReviews ?? metrics.reviewCount, NORMALIZE_MAX.reviewCount);
   const concentration = metrics.topConcentration ?? 0;
   const priceFactor = 1 - normalize(metrics.avgPrice, NORMALIZE_MAX.price);
@@ -108,17 +183,31 @@ export function computeMargin(metrics = {}) {
 }
 
 export function computeConfidence(metrics = {}) {
-  const signals = [
-    'listingCount',
+  const baseSignals = [
+    ['sampleSize', 'listingCount'],
     'totalReviews',
     'avgRating',
     'avgPrice',
     'topConcentration'
-  ].filter((k) => {
-    const v = metrics[k];
-    return v != null && v !== undefined;
-  }).length;
-  return clamp(signals / 5, 0, 1);
+  ];
+  let met = 0;
+  baseSignals.forEach((sig) => {
+    if (Array.isArray(sig)) {
+      if (sig.some((k) => metrics[k] != null && metrics[k] !== undefined)) met += 1;
+    } else if (metrics[sig] != null && metrics[sig] !== undefined) {
+      met += 1;
+    }
+  });
+  let total = baseSignals.length;
+
+  // Real BSR coverage (from enrichment) boosts confidence when it exists.
+  const cov = metrics.bsrCoverage;
+  if (cov != null && cov > 0) {
+    met += 1;
+    total += 1;
+  }
+
+  return clamp(met / total, 0, 1);
 }
 
 export function computeOpportunityScore(metrics = {}) {
@@ -148,13 +237,159 @@ export function verdict(score) {
   return { label: 'Hard niche', tone: 'poor' };
 }
 
-export function preprocessMetrics(listings) {
+/**
+ * Rules-v1 helper: count "fresh hits" — competitor samples that are BOTH
+ * recently published (rule 1: <= maxBookAgeMonths) AND already selling
+ * (rule 2: overall Books BSR <= overallBsrMax), excluding big-brand books
+ * (rule 3) when the brand filter is on. This is the literal rules-1+2+3
+ * combination: a niche qualifies when at least freshHitsMin such books exist.
+ */
+export function computeFreshHits(bsrSamples = [], { maxBookAgeMonths = 6, overallBsrMax = 200000, brandBlockedAsins = new Set(), now = Date.now() } = {}) {
+  const fresh = (bsrSamples || []).filter((s) => {
+    if (!s || s.bsr == null) return false;
+    if (brandBlockedAsins.has(s.asin)) return false;
+    if (s.pubDateEpoch == null) return false;
+    const cutoff = now - maxBookAgeMonths * 30.44 * 24 * 60 * 60 * 1000;
+    return s.pubDateEpoch >= cutoff && s.bsr <= overallBsrMax;
+  });
+  return fresh.length;
+}
+
+/**
+ * Rules-v1 rule engine. Extends the v0.6 contract with:
+ *   fresh      — >= freshHitsMin new (<=6mo), selling (BSR<=200k), unbranded competitors
+ *   bsrOverall — min overall Books BSR among enriched samples <= overallBsrMax (rule 2)
+ *   listings   — market-aware result-count cap: US 1000 / others 800 (rule 1)
+ *   brand      — no big-brand book in the enriched sample (rule 3)
+ *   format     — when a format filter is active, that format's share >= min (rule 6)
+ * plus the legacy volume (interest proxy, rule 4) and contentType gates.
+ * `market` must be passed for the US-vs-other listing cap.
+ */
+export function computeQualifies(metrics = {}, thresholds = {}, market = 'us') {
+  const bsrThreshold = thresholds.bsrThreshold ?? 200;
+  const subBsrEnabled = thresholds.subBsrEnabled === true;
+  const overallBsrMax = thresholds.overallBsrMax ?? 200000;
+  const overallBsrEnabled = thresholds.overallBsrEnabled !== false;
+  const usListingsMax = thresholds.usListingsMax ?? 1000;
+  const otherListingsMax = thresholds.otherListingsMax ?? 800;
+  const volumeThreshold = thresholds.volumeThreshold ?? 50;
+  const contentTypeEnabled = thresholds.contentTypeEnabled !== false;
+  const maxBookAgeMonths = thresholds.maxBookAgeMonths ?? 6;
+  const freshHitsMin = thresholds.freshHitsMin ?? 1;
+  const brandFilterEnabled = thresholds.brandFilterEnabled !== false;
+  const keywordSuggestedRequired = thresholds.keywordSuggestedRequired === true;
+  const formatFilter = thresholds.formatFilter ?? null;
+  const minFormatShare = thresholds.minFormatShare ?? 0.5;
+
+  const samples = Array.isArray(metrics.bsrSamples) ? metrics.bsrSamples : [];
+
+  // Rule 2: overall Books BSR — best (lowest) rank among enriched samples.
+  const overallRanks = samples.map((s) => s && s.bsr).filter((r) => r != null);
+  const bestOverallBsr = overallRanks.length ? Math.min(...overallRanks) : null;
+
+  // Rule 3: big-brand exclusion set. brandBlockedAsins is precomputed by the
+  // background from lib/brands.js over title+publisher+author.
+  const brandBlockedAsins = new Set(metrics.brandBlockedAsins || []);
+
+  // Rule 1+2+3 combo: fresh hits.
+  const freshHits = computeFreshHits(samples, {
+    maxBookAgeMonths,
+    overallBsrMax,
+    brandBlockedAsins,
+    now: metrics.freshnessNow || Date.now()
+  });
+
+  // Gap F (Revision 2): a niche where one single title owns the majority of
+  // all reviews is a branded/single-work-driven term, not a generalizable
+  // demand pool — exclude it once the evidence floor is met.
+  const leaderDominates =
+    metrics.leaderDominanceRatio != null &&
+    metrics.leaderDominanceRatio >= 0.6 &&
+    (metrics.totalReviews || 0) >= 30 &&
+    (metrics.sampleSize || 0) >= 5;
+
+  // Rules v1: in rule8/strict scopes only EXPLICIT publishable families pass
+  // the content gate; 'unknown' is not a family. 'standard' keeps the legacy
+  // pass-through (unknown passes).
+  const scope = thresholds.contentScope || 'rule8';
+  const unknownPasses = scope === 'standard';
+
+  const excluded =
+    metrics.contentType === 'high-content-excluded' ||
+    metrics.requiresExpertise === true ||
+    leaderDominates ||
+    (!unknownPasses && (metrics.contentType == null || metrics.contentType === 'unknown'));
+
+  const listingsCap = (market || 'us').toLowerCase() === 'us' ? usListingsMax : otherListingsMax;
+
+  const q = {
+    fresh: freshHits >= freshHitsMin,
+    bsrOverall: overallBsrEnabled
+      ? bestOverallBsr != null && bestOverallBsr <= overallBsrMax
+      : true,
+    bsr: subBsrEnabled
+      ? metrics.bestSubcategoryBsr != null && metrics.bestSubcategoryBsr <= bsrThreshold
+      : true, // optional ADVANCED gate (legacy v0.3 rule) — default off
+    listings: metrics.totalResultsCount != null
+      ? metrics.totalResultsCount <= listingsCap
+      : false,
+    volume: metrics.demandProxyScore != null
+      ? metrics.demandProxyScore >= volumeThreshold &&
+        (!keywordSuggestedRequired || metrics.keywordSuggested === true)
+      : false,
+    brand: brandFilterEnabled ? !metrics.brandRisk || !(metrics.brandRisk.topBranded) : true,
+    format: formatFilter
+      ? (metrics.formatShares && metrics.formatShares[formatFilter] != null
+          ? metrics.formatShares[formatFilter] >= minFormatShare
+          : false)
+      : true,
+    contentType: contentTypeEnabled ? !excluded : true
+  };
+  q.all = q.fresh && q.bsrOverall && q.bsr && q.listings && q.volume && q.brand && q.format && q.contentType;
+  return q;
+}
+
+export function attachQualifies(record, thresholds = {}, market) {
+  if (!record || typeof record !== 'object') return record;
+  record.qualifies = computeQualifies(record.metrics || {}, thresholds, market || record.market || 'us');
+  return record;
+}
+
+export function preprocessMetrics(listings, extra = {}) {
   const stats = computeListingsStats(listings);
   const withKindle = listings.filter((l) => l.mediaType === 'kindle' || l.mediaType === 'ebook').length;
   stats.kindleShare = listings.length ? withKindle / listings.length : 0;
+  // Rule 7 (v0.8): FBA/Amazon-retail share — flagged (not dropped) so the
+  // dashboard + MyResearchBase cross-check can isolate the KDP pool.
+  const fbaCount = (listings || []).filter((l) => l && l.fba).length;
+  stats.fbaCount = fbaCount;
+  stats.fbaShare = listings.length ? fbaCount / listings.length : 0;
+  // Rules v1 (rule 6): per-format shares from the SERP sample.
+  const byFormat = { kindle: 0, paperback: 0, hardcover: 0, unknown: 0 };
+  listings.forEach((l) => {
+    const t = l.mediaType || 'unknown';
+    byFormat[t] = (byFormat[t] || 0) + 1;
+  });
+  stats.formatShares = listings.length
+    ? Object.fromEntries(Object.entries(byFormat).map(([k, v]) => [k, v / listings.length]))
+    : byFormat;
   stats.estimatedMonthlySales = estimateMonthlySales(stats.medianRank ?? stats.avgBsr);
   stats.sample = listings.slice(0, 12);
+  stats.sampleSize = stats.listingCount;
+  if (extra.totalResultsCount != null) {
+    stats.totalResultsCount = extra.totalResultsCount;
+    stats.resultsCountIsApprox = !!extra.resultsCountIsApprox;
+  }
   return stats;
+}
+
+/** Merge a freshly-parsed BSR sample into an existing metrics object. */
+export function applyBsrSamples(metrics = {}, bsrSamples = [], sampleSize = 0, thresholds = {}) {
+  const bsrStats = computeBsrStats(bsrSamples, sampleSize);
+  const merged = { ...metrics, ...bsrStats };
+  merged.estimatedMonthlySales = estimateMonthlySales(merged.medianRank ?? merged.avgBsr);
+  merged.bestSubcategoryBsr = bsrStats.bestSubcategoryBsr;
+  return merged;
 }
 
 /**
@@ -169,7 +404,7 @@ export function longTailKeywordBoost(keyword) {
 }
 
 export function scoreKeyword(keyword, metrics = {}, options = {}) {
-  const processed = metrics && metrics.listingCount != null
+  const processed = metrics && (metrics.listingCount != null || metrics.sampleSize != null)
     ? metrics
     : preprocessMetrics(metrics.sample || []);
 
@@ -179,7 +414,7 @@ export function scoreKeyword(keyword, metrics = {}, options = {}) {
   const base = computeOpportunityScore({ ...processed, demand, competition, margin });
   const boost = options.longTail ? longTailKeywordBoost(keyword) : 1;
 
-  return {
+  const scored = {
     keyword,
     metrics: processed,
     demand,
@@ -190,4 +425,6 @@ export function scoreKeyword(keyword, metrics = {}, options = {}) {
     verdict: verdict(base.score * boost),
     score: clamp(base.score * boost, 0, 100)
   };
+  if (options.thresholds) attachQualifies(scored, options.thresholds, options.market);
+  return scored;
 }

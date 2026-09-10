@@ -1,136 +1,103 @@
-import { populateMarketSelects } from './../app.js';
+import { send, fmt, escapeHtml, showStatus } from '../helpers.js';
+import { settings } from '../app.js';
+import { getMarkets } from './markets.js';
 
-let suggestions = [];
+const $ = (id) => document.getElementById(id);
 
-export function loadSuggestionsView() {
-  populateMarketSelects();
-
-  const goBtn = document.getElementById('suggest-go');
-  const seedInput = document.getElementById('suggest-seed');
-
-  if (!goBtn.dataset.bound) {
-    goBtn.onclick = () => fetchForSeed(seedInput.value);
-    document.getElementById('suggest-expand').onclick = expandFromSuggestions;
-    document.getElementById('suggest-clear').onclick = clearAll;
-    seedInput.addEventListener('keydown', (e) => {
-      if (e.key === 'Enter') fetchForSeed(seedInput.value);
-    });
-    goBtn.dataset.bound = 'true';
-  }
-
-  refresh();
-}
-
-async function fetchForSeed(seed) {
-  const market = document.getElementById('market-select').value || 'us';
-  if (!seed || !seed.trim()) return showStatus('Enter a keyword to fetch suggestions for.');
-  showStatus(`Fetching suggestions for "${seed}"…`);
-  try {
-    const res = await chrome.runtime.sendMessage({ type: 'FETCH_SUGGESTIONS', seed: seed.trim(), market });
-    if (!res.ok) throw new Error(res.error);
-    const { amazon, google } = res.result;
-    const all = [];
-    amazon.forEach((k) => all.push({ id: `amazon-autocomplete:${k}:${market}`, keyword: k, source: 'amazon-autocomplete', market, score: 0, expandedFrom: seed }));
-    google.forEach((k) => all.push({ id: `google-suggest:${k}:${market}`, keyword: k, source: 'google-suggest', market, score: 0, expandedFrom: seed }));
-    const grouped = Object.values(
-      all.reduce((acc, s) => {
-        if (acc[s.keyword]) acc[s.keyword].source = 'both';
-        else acc[s.keyword] = s;
-        return acc;
-      }, {})
-    );
-    await chrome.runtime.sendMessage({ type: 'SAVE_SUGGESTIONS', suggestions: grouped }).catch(() => {
-      // SAVE_SUGGESTIONS is added by the background router for storage only.
-    });
-    const parts = [];
-    if (amazon.length) parts.push(`${amazon.length} Amazon`);
-    if (google.length) parts.push(`${google.length} Google`);
-    showStatus(
-      parts.length
-        ? `Collected ${grouped.length} unique suggestions (${parts.join(', ')}).`
-        : 'No suggestions returned. Amazon/Google may be rate-limiting — wait a few seconds and try again.'
-    );
-    refresh();
-  } catch (err) {
-    showStatus(`Error: ${err.message}`);
-  }
-}
-
-async function expandFromSuggestions() {
-  const market = document.getElementById('market-select').value || 'us';
-  showStatus('Expanding all suggestions into scored keywords…');
-  try {
-    const res = await chrome.runtime.sendMessage({
-      type: 'EXPAND_FROM_SUGGESTIONS',
-      market
-    });
-    if (!res.ok) throw new Error(res.error);
-    showStatus(`Added ${res.result.count} keywords from suggestions. Auto-scraping started.`);
-  } catch (err) {
-    showStatus(`Error: ${err.message}`);
-  }
-}
-
-async function clearAll() {
-  await chrome.runtime.sendMessage({ type: 'CLEAR_SUGGESTIONS' }).catch(() => {});
-  showStatus('Suggestions cleared.');
-  refresh();
+export async function onShow() {
+  await refresh();
 }
 
 async function refresh() {
   try {
-    const res = await chrome.runtime.sendMessage({ type: 'GET_SUGGESTIONS' });
-    if (!res.ok) throw new Error(res.error);
-    suggestions = res.result || [];
-    render();
+    const list = await send('GET_SUGGESTIONS');
+    renderTable(list);
+    showStatus($('suggest-status'), `${list.length} suggestion(s) stored.`);
   } catch (err) {
-    showStatus(`Error: ${err.message}`);
+    showStatus($('suggest-status'), err.message, true);
   }
 }
 
-function render() {
-  const body = document.getElementById('suggest-body');
-  const sorted = [...suggestions].sort((a, b) => (b.createdAt || 0) - (a.createdAt || 0));
-
-  if (!sorted.length) {
-    body.innerHTML = '<tr><td colspan="6" class="muted">No suggestions yet.</td></tr>';
+function renderTable(list) {
+  const body = $('suggest-body');
+  if (!list.length) {
+    body.innerHTML =
+      '<tr><td colspan="6" class="muted">No suggestions yet. Autocomplete seeds populate this list.</td></tr>';
     return;
   }
-
-  body.innerHTML = sorted
+  const sorter = (a, b) => (b.score || 0) - (a.score || 0);
+  body.innerHTML = [...list]
+    .sort(sorter)
+    .slice(0, 500)
     .map(
       (s) => `<tr>
-        <td>${escapeHtml(s.keyword)}</td>
-        <td><span class="source-tag">${escapeHtml(s.source)}</span></td>
-        <td class="muted">${escapeHtml((s.market || 'us').toUpperCase())}</td>
-        <td>${s.score ? Number(s.score).toFixed(2) : '—'}</td>
-        <td class="muted">${s.createdAt ? new Date(s.createdAt).toLocaleDateString() : '—'}</td>
+        <td>${escapeHtml(s.keyword)}
+          <span class="source-tag">${escapeHtml(s.source || 'unknown')}</span>
+        </td>
+        <td class="muted">${escapeHtml(s.source || '—')}</td>
+        <td class="muted">${escapeHtml(s.market || 'us').toUpperCase()}</td>
+        <td class="score-badge">${fmt.score(s.score)}</td>
+        <td class="muted">${fmt.datetime(s.collectedAt || s.timestamp || s.createdAt)}</td>
         <td>
-          <button data-action="scrape" data-keyword="${escapeAttr(s.keyword)}" class="secondary outline">Scrape</button>
+          <a href="#" class="suggest-expand" data-keyword="${escapeHtml(s.keyword)}" data-market="${escapeHtml(s.market || 'us')}">Expand</a> ·
+          <a href="#" class="suggest-scrape" data-keyword="${escapeHtml(s.keyword)}" data-market="${escapeHtml(s.market || 'us')}">Scrape</a>
         </td>
       </tr>`
     )
     .join('');
 
-  body.querySelectorAll('[data-action="scrape"]').forEach((btn) => {
-    btn.onclick = async () => {
-      const market = document.getElementById('market-select').value || 'us';
-      await chrome.runtime.sendMessage({ type: 'SCRAPE_KEYWORD', payload: { keyword: btn.dataset.keyword, market } });
-      showStatus(`Queued "${btn.dataset.keyword}".`);
-    };
-  });
+  body.querySelectorAll('.suggest-expand').forEach((a) =>
+    a.addEventListener('click', async (e) => {
+      e.preventDefault();
+      const market = (a.dataset.market || (await settings()).market || 'us');
+      await send('EXPAND_SEED', { seed: a.dataset.keyword, market });
+      showStatus($('suggest-status'), `Expanded "${a.dataset.keyword}" and queued scraping.`);
+      refresh();
+    })
+  );
+  body.querySelectorAll('.suggest-scrape').forEach((a) =>
+    a.addEventListener('click', async (e) => {
+      e.preventDefault();
+      const market = (a.dataset.market || (await settings()).market || 'us');
+      await send('SCRAPE_KEYWORD', { keyword: a.dataset.keyword, market });
+      showStatus($('suggest-status'), `Queued scrape for "${a.dataset.keyword}".`);
+    })
+  );
 }
 
-function showStatus(text) {
-  document.getElementById('suggest-status').textContent = text;
-}
+$('suggest-go').addEventListener('click', async () => {
+  const seed = $('suggest-seed').value.trim();
+  if (!seed) {
+    showStatus($('suggest-status'), 'Enter a keyword first.', true);
+    return;
+  }
+  const s = await settings();
+  try {
+    const r = await send('FETCH_SUGGESTIONS', { seed, market: s.market });
+    showStatus($('suggest-status'), `Saved ${r.amazon.length} Amazon + ${r.google.length} Google suggestions for "${seed}".`);
+    refresh();
+  } catch (err) {
+    showStatus($('suggest-status'), err.message, true);
+  }
+});
 
-function escapeHtml(s) {
-  return String(s).replace(/[&<>"']/g, (c) => ({
-    '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;'
-  }[c]));
-}
+$('suggest-expand').addEventListener('click', async () => {
+  const s = await settings();
+  try {
+    const r = await send('EXPAND_FROM_SUGGESTIONS', { market: s.market });
+    showStatus($('suggest-status'), `Expanded ${r.count} unique suggestions; queued scraping.`);
+    refresh();
+  } catch (err) {
+    showStatus($('suggest-status'), err.message, true);
+  }
+});
 
-function escapeAttr(s) {
-  return escapeHtml(s);
-}
+$('suggest-clear').addEventListener('click', async () => {
+  if (!confirm('Clear all stored suggestions?')) return;
+  try {
+    await send('CLEAR_SUGGESTIONS');
+    refresh();
+  } catch (err) {
+    showStatus($('suggest-status'), err.message, true);
+  }
+});
