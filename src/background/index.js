@@ -325,12 +325,8 @@ async function handleMessage(message, sender = {}) {
     case 'CLEAR_ALL':
       scrapeQueue.abort();
       // Stop a mid-flight discovery run: its wait loop breaks on active=false
-      // and its epoch guard (below) drops the pending put/enqueue steps.
-  discoveryState.active = false;
-
-  // Start-Over arrived mid-run (CLEAR_ALL flips active=false and bumps the
-  // queue epoch): drop everything instead of re-populating a cleared workspace.
-  if (epoch !== scrapeQueue.epoch) return { count: 0, discovered: [], aborted: true };
+      // and its epoch guard drops the pending put/enqueue steps.
+      discoveryState.active = false;
       discoveryState.found = [];
       await clearKeywords();
       await clearSuggestions();
@@ -1630,6 +1626,10 @@ async function runDiscovery({
   }
 
   discoveryState.active = false;
+
+  // Start-Over arrived mid-run (CLEAR_ALL flips active=false and bumps the
+  // queue epoch): drop everything instead of re-populating a cleared workspace.
+  if (epoch !== scrapeQueue.epoch) return { count: 0, discovered: [], aborted: true };
 
   // Distinct titles → cleaned keyword seeds.
   const seen = new Set();
