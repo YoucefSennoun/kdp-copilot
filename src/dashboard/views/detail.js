@@ -29,7 +29,18 @@ export async function openDetailDrawer(keyword, opts = {}) {
       drawer.innerHTML = `<h3>${escapeHtml(keyword)}</h3><p class="muted">No saved data for this keyword yet.</p>`;
       return;
     }
-    renderDetail(k, opts);
+    // Fresh analysis passed straight from the AI button, otherwise fall back
+    // to the cached report so Details keeps showing the AI read without
+    // re-running (and paying for) the call.
+    let analysis = opts.analysis || null;
+    if (!analysis) {
+      try {
+        analysis = await send('GET_ANALYSIS', { keyword, market: opts.market || k.market });
+      } catch {
+        analysis = null;
+      }
+    }
+    renderDetail(k, { ...opts, analysis });
   } catch (err) {
     drawer.innerHTML = `<h3>${escapeHtml(keyword)}</h3><p style="color:#e53935;">Failed to load: ${escapeHtml(err.message)}</p>`;
   }
@@ -128,14 +139,32 @@ function renderDetail(k, opts) {
       </details>`
     : '';
 
-  const analysisHtml =
-    k.analysis && k.analysis.report
-      ? `<h3>AI Niche Analysis</h3>
-         <div class="ai-output">${escapeHtml(k.analysis.report)}</div>`
-      : opts.analysis && opts.analysis.report
-        ? `<h3>AI Niche Analysis</h3>
-           <div class="ai-output">${escapeHtml(opts.analysis.report)}</div>`
-        : '';
+  const analysisHtml = analysisHtmlFor(opts.analysis);
+
+  function analysisHtmlFor(a) {
+    if (!a || typeof a !== 'object') return '';
+    // Legacy shape (plain report string).
+    if (a.report) {
+      return `<h3>AI Niche Analysis</h3><div class="ai-output">${escapeHtml(a.report)}</div>`;
+    }
+    // Current shape from analyzeNiche: levels + angles + risks.
+    if (!a.oneLineRead && !a.entryDifficulty && !Array.isArray(a.contentAngles)) return '';
+    const list = (arr) => Array.isArray(arr) && arr.length
+      ? `<ul style="margin:.3rem 0;">${arr.map((x) => `<li>${escapeHtml(x)}</li>`).join('')}</ul>`
+      : '';
+    const level = (label, v) => v
+      ? `<span class="muted">${label}:</span> <b>${escapeHtml(v)}</b> &nbsp;`
+      : '';
+    return `<h3>AI Niche Analysis${a.analyzedAt ? ` <span class="muted" style="font-weight:400; font-size:.8rem;">· ${fmt.datetime(a.analyzedAt)}</span>` : ''}</h3>
+      <div class="ai-output">${escapeHtml(a.oneLineRead || '')}</div>
+      <p style="margin:.4rem 0;">${level('Competition', a.competitionLevel)}${level('Demand', a.demandLevel)}${level('Opportunity', a.opportunityLevel)}</p>
+      ${a.entryDifficulty ? `<p><b>Entry difficulty:</b> ${escapeHtml(a.entryDifficulty)}</p>` : ''}
+      ${a.contentAngles ? `<p><b>Underserved angles:</b></p>${list(a.contentAngles)}` : ''}
+      ${a.differentiation ? `<p><b>Stand out by:</b></p>${list(a.differentiation)}` : ''}
+      ${a.risks ? `<p><b>Risks:</b></p>${list(a.risks)}` : ''}
+      ${a.recommendedAudience ? `<p><b>Audience:</b> ${escapeHtml(a.recommendedAudience)}</p>` : ''}
+      ${a.pricePoint ? `<p><b>Price point:</b> ${escapeHtml(a.pricePoint)}</p>` : ''}`;
+  }
 
   const titleIdea = k.aiTitleIdea
     ? `<p><b>Title idea:</b> ${escapeHtml(k.aiTitleIdea)}</p>`

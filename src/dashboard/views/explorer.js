@@ -246,9 +246,14 @@ async function handleRowAction(keyword, act) {
   try {
     switch (act) {
       case 'ai': {
-        showStatus($('status'), `Analyzing "${keyword}" with AI…`);
-        const r = await send('ANALYZE_NICHE', { keyword, market });
-        openDetailDrawer(keyword, { market, analysis: r });
+        const stop = startBusyStatus($('status'), `Analyzing "${keyword}" with AI — this can take up to a minute`);
+        try {
+          const r = await send('ANALYZE_NICHE', { keyword, market });
+          openDetailDrawer(keyword, { market, analysis: r });
+          showStatus($('status'), `AI analysis ready for "${keyword}" — see the detail drawer.`);
+        } finally {
+          stop();
+        }
         break;
       }
       case 'legal': {

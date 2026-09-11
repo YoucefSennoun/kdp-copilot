@@ -13,7 +13,8 @@ export const fmt = {
   },
 
   score(n) {
-    return n == null ? '—' : `${n}`;
+    if (n == null || Number.isNaN(Number(n))) return '—';
+    return Number(n).toLocaleString(undefined, { maximumFractionDigits: 1 });
   },
 
   sales(n) {

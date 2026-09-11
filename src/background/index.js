@@ -30,6 +30,7 @@ import {
   clearSuggestions,
   pruneSuggestions,
   putAnalysis,
+  getAnalysis,
   clearAnalyses,
   putLegal,
   getLegal,
@@ -400,6 +401,8 @@ async function handleMessage(message, sender = {}) {
     // AI actions
     case 'ANALYZE_NICHE':
       return handleAnalyzeNiche(k('keyword'), k('market'));
+    case 'GET_ANALYSIS':
+      return getAnalysis(k('keyword'), k('market'));
     case 'GENERATE_LISTING':
       return handleGenerateListing(k('keyword'), k('niche'), k('market'));
     case 'CHECK_TRADEMARK':
