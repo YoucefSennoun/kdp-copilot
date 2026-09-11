@@ -1,4 +1,4 @@
-import { send, fmt, escapeHtml, showStatus } from '../helpers.js';
+import { send, fmt, escapeHtml, showStatus, startBusyStatus } from '../helpers.js';
 import { settings } from '../app.js';
 import { getMarkets } from './markets.js';
 
@@ -51,12 +51,15 @@ function renderTable(list) {
       e.preventDefault();
       a.style.pointerEvents = 'none';
       a.style.opacity = '0.4';
+      const stop = startBusyStatus($('suggest-status'), `Expanding "${a.dataset.keyword}" — autocomplete soup plus AI can take a few minutes`);
       try {
         const market = (a.dataset.market || (await settings()).market || 'us');
         await send('EXPAND_SEED', { seed: a.dataset.keyword, market });
+        stop();
         showStatus($('suggest-status'), `Expanded "${a.dataset.keyword}" and queued scraping.`);
         refresh();
       } catch (err) {
+        stop();
         showStatus($('suggest-status'), `Expand failed for "${a.dataset.keyword}": ${err.message}`, true);
       } finally {
         a.style.pointerEvents = '';

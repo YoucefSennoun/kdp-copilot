@@ -53,6 +53,7 @@ import {
   localTrademarkSweep,
   localExpandSuggestions,
   computeSuggestionRelevance,
+  isOverloadedError,
   getApiKey,
   hasCustomAI,
   fetchModelChoices,
@@ -1018,15 +1019,32 @@ async function handleExpandSeed(seed, marketCode) {
   const scope = settings.contentScope || 'rule8';
 
   let suggestions;
+  let aiUsed = false;
   if (aiAvailable) {
-    suggestions = await expandNicheSeeds({
-      apiKey,
-      seed,
-      market,
-      count: 12,
-      allowFiction,
-      scope
-    });
+    try {
+      suggestions = await expandNicheSeeds({
+        apiKey,
+        seed,
+        market,
+        count: 12,
+        allowFiction,
+        scope
+      });
+      aiUsed = true;
+    } catch (err) {
+      // Model overloaded / server busy: fall back to corpus-verified local
+      // expansion instead of failing the whole click. Auth/config errors
+      // still throw so bad keys surface instead of silently degrading.
+      if (!isOverloadedError(err)) throw err;
+      broadcastPipeline('serp', `AI expansion overloaded — falling back to autocomplete expansion for "${seed}".`);
+      suggestions = await localExpandSuggestions({
+        amazonWords: corpus.amazon.map((e) => e.term),
+        googleWords: corpus.google.map((e) => e.term),
+        seed,
+        allowFiction,
+        scope
+      });
+    }
   } else {
     suggestions = await localExpandSuggestions({
       amazonWords: corpus.amazon.map((e) => e.term),
@@ -1062,7 +1080,7 @@ async function handleExpandSeed(seed, marketCode) {
       skippedCt++;
       return false;
     }
-    if (classifyDrop(keyword, { dropUnknown: aiAvailable })) {
+    if (classifyDrop(keyword, { dropUnknown: aiUsed })) {
       skippedCt++;
       return false;
     }

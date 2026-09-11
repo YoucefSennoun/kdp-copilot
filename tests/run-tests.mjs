@@ -19,7 +19,7 @@ import {
   deriveSuggestionProxy
 } from '../src/lib/proxy.js';
 import { classifyContentType, isLowContentNiche, scopeAllows } from '../src/lib/content-type.js';
-import { isSuggestibleSuggestion, buildChatBody, parseChatResponse, buildResponsesBody, parseResponsesResponse, customTransportFor, sanitizeGeminiModel, fetchModelChoices, sanitizeJson, isJsonFormatError } from '../src/background/ai.js';
+import { isSuggestibleSuggestion, buildChatBody, parseChatResponse, buildResponsesBody, parseResponsesResponse, customTransportFor, sanitizeGeminiModel, fetchModelChoices, sanitizeJson, isJsonFormatError, isOverloadedError, retryOnOverload } from '../src/background/ai.js';
 import { parsePubDate, isFreshPub } from '../src/lib/dates.js';
 import { computeBrandRisk, matchBlockedBrand, matchFamousAuthor, computeAuthorFrequencyRisk, flagBrandedSamples } from '../src/lib/brands.js';
 import { buildRegistryLookups, localTrademarkScreen, COPYRIGHT_NOTE } from '../src/lib/trademark-registry.js';
@@ -843,6 +843,33 @@ console.log('\n[28] v0.8.12: tolerant JSON parsing for sloppy model output');
   assert(isJsonFormatError(new SyntaxError('Expected double-quoted property name in JSON at position 4982')) === true, 'V8 parse error is retryable');
   assert(isJsonFormatError(new Error('Model returned an unexpected response format.')) === true, 'format error is retryable');
   assert(isJsonFormatError(new Error('OpenRouter API error 401: bad key')) === false, 'auth errors are not retryable as format errors');
+}
+
+console.log('\n[29] v0.8.14: overload retries + AI-to-local fallback gating');
+{
+  assert(isOverloadedError(new Error('Gemini API error 503: model is overloaded')) === true, 'Gemini 503 is overload');
+  assert(isOverloadedError(new Error('OpenRouter API error 429: rate limited')) === true, '429 is overload');
+  assert(isOverloadedError(new Error('model under high demand, try again later')) === true, 'demand wording is overload');
+  assert(isOverloadedError(new Error('OpenRouter API error 404: deprecated')) === false, '404 is not overload');
+  assert(isOverloadedError(new Error('OpenRouter API error 401: bad key')) === false, '401 is not overload');
+  assert(isOverloadedError(null) === false, 'null is not overload');
+
+  let calls = 0;
+  const flaky = async () => {
+    calls++;
+    if (calls < 3) throw new Error('Gemini API error 503: overloaded');
+    return 'recovered';
+  };
+  const slept = [];
+  const out = await retryOnOverload(flaky, { retries: 2, baseMs: 10, sleepFn: (ms) => { slept.push(ms); return Promise.resolve(); } });
+  assert(out === 'recovered' && calls === 3, 'retries until success on overload');
+  assert(slept.length === 2 && slept[0] === 10 && slept[1] === 20, 'exponential backoff between retries');
+
+  let fastFail = 0;
+  try {
+    await retryOnOverload(async () => { fastFail++; throw new Error('Gemini API error 400: bad request'); }, { sleepFn: () => Promise.resolve() });
+  } catch { /* expected */ }
+  assert(fastFail === 1, 'non-overload errors throw immediately without retry');
 }
 
 console.log(`\n${passed} passed, ${failed} failed`);

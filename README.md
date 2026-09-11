@@ -1,4 +1,4 @@
-# KDP Copilot — v0.8.13
+# KDP Copilot — v0.8.14
 
 A Chrome extension (Manifest V3) that turns Amazon KDP keyword research into a **scored, rules-driven workflow**.
 It injects a Productor-style research panel into Amazon search results, qualifies niches with a
@@ -10,7 +10,7 @@ without an API key via live Amazon + Google autocomplete.
 
 ---
 
-## What v0.8.13 checks (rules-v1)
+## What v0.8.14 checks (rules-v1)
 
 Every researched keyword is judged against 8 gates (`qualifies.all` must be true).
 All thresholds are configurable in **Settings**:
@@ -81,7 +81,7 @@ All thresholds are configurable in **Settings**:
 
 ## Install
 
-1. Download `kdp-copilot-v0.8.13.zip` from the
+1. Download `kdp-copilot-v0.8.14.zip` from the
    [Releases page](https://github.com/YoucefSennoun/kdp-copilot/releases) and unzip it.
 2. Open `chrome://extensions`.
 3. Enable **Developer mode** (top-right toggle).

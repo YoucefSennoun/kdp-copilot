@@ -179,10 +179,12 @@ export async function callCustomAI({ baseUrl, apiKey, model, systemInstruction, 
   const base = String(baseUrl || DEFAULT_CUSTOM_BASE_URL).replace(/\/+$/, '');
   const label = providerLabelFor(base);
   if (customTransportFor(model) === 'responses') {
-    const data = await postJson(`${base}/responses`, apiKey, buildResponsesBody({ model, systemInstruction, prompt }), label);
+    const data = await retryOnOverload(() =>
+      postJson(`${base}/responses`, apiKey, buildResponsesBody({ model, systemInstruction, prompt }), label));
     return parseResponsesResponse(data);
   }
-  const data = await postJson(`${base}/chat/completions`, apiKey, buildChatBody({ model, systemInstruction, prompt }), label);
+  const data = await retryOnOverload(() =>
+    postJson(`${base}/chat/completions`, apiKey, buildChatBody({ model, systemInstruction, prompt }), label));
   return parseChatResponse(data);
 }
 
@@ -333,7 +335,34 @@ export function isJsonFormatError(err) {
 
 const JSON_REPAIR_NOTE = '\n\nIMPORTANT: your previous reply was not valid JSON and could not be parsed. Reply again with ONLY the raw JSON value — no prose, no markdown fences, no comments, no trailing commas, double-quoted property names only.';
 
+/** True for transient server-side busy/rate errors worth an automatic retry. Pure. */
+export function isOverloadedError(err) {
+  if (!err) return false;
+  return /API error (429|50\d)|overload|over capacity|rate.?limit|too many requests|temporar|server error|try again later|model .* (busy|demand)/i.test(err.message || '');
+}
+
+const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+
+/**
+ * Run fn(), retrying overload errors with exponential backoff (3s, 6s).
+ * Non-overload errors throw immediately. sleepFn is injectable for tests.
+ */
+export async function retryOnOverload(fn, { retries = 2, baseMs = 3000, sleepFn = sleep } = {}) {
+  let lastErr = null;
+  for (let attempt = 0; attempt <= retries; attempt++) {
+    try {
+      return await fn();
+    } catch (err) {
+      lastErr = err;
+      if (!isOverloadedError(err) || attempt === retries) throw err;
+      await sleepFn(baseMs * 2 ** attempt);
+    }
+  }
+  throw lastErr;
+}
+
 async function callGemini({ apiKey, model = DEFAULT_MODEL, systemInstruction, prompt, schema }) {
+  return retryOnOverload(async () => {
   const contents = [];
   if (systemInstruction) {
     contents.push({ role: 'user', parts: [{ text: systemInstruction }] });
@@ -374,6 +403,7 @@ async function callGemini({ apiKey, model = DEFAULT_MODEL, systemInstruction, pr
     .join('') || '{}';
 
   return sanitizeJson(text);
+  });
 }
 
 // ---------------------------------------------------------------------------
