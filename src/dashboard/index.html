@@ -236,6 +236,10 @@
       <section id="view-suggestions" class="tab-content suggestions-panel">
         <div class="inline-grid">
           <input id="suggest-seed" type="text" placeholder="Keyword to pull Amazon + Google autocomplete for…" />
+          <div>
+            <label for="suggest-market" class="muted" style="font-size:.8rem;">Market</label>
+            <select id="suggest-market" title="Autocomplete is scoped per marketplace (Amazon host + language); the delivery-ZIP pin applies automatically when scraping."></select>
+          </div>
           <button id="suggest-go" class="secondary">Fetch Suggested Keywords</button>
           <button id="suggest-expand" class="secondary outline">Expand From All Suggestions</button>
           <button id="suggest-clear" class="secondary outline">Clear Suggestions</button>

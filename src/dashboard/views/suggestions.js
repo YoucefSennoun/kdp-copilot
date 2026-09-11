@@ -1,11 +1,29 @@
 import { send, fmt, escapeHtml, showStatus, startBusyStatus } from '../helpers.js';
 import { settings } from '../app.js';
-import { getMarkets } from './markets.js';
+import { marketOptions } from './markets.js';
 
 const $ = (id) => document.getElementById(id);
 
 export async function onShow() {
+  await populateMarkets();
   await refresh();
+}
+
+async function populateMarkets() {
+  const sel = $('suggest-market');
+  if (!sel) return;
+  sel.innerHTML = marketOptions();
+  try {
+    const current = await settings();
+    if (current.market) sel.value = current.market;
+  } catch {
+    // keep US default
+  }
+}
+
+function currentMarket() {
+  const sel = $('suggest-market');
+  return (sel && sel.value) || 'us';
 }
 
 async function refresh() {
@@ -87,15 +105,15 @@ $('suggest-go').addEventListener('click', async () => {
     showStatus($('suggest-status'), 'Enter a keyword first.', true);
     return;
   }
-  const s = await settings();
+  const market = currentMarket();
   try {
-    const r = await send('FETCH_SUGGESTIONS', { seed, market: s.market });
+    const r = await send('FETCH_SUGGESTIONS', { seed, market });
     const warnings = Array.isArray(r.warnings) ? r.warnings : [];
     const saved = (r.amazon.length || 0) + (r.google.length || 0);
     if (!saved && warnings.length) {
-      showStatus($('suggest-status'), `No suggestions for "${seed}" — ${warnings.join(' ')}`, true);
+      showStatus($('suggest-status'), `No suggestions for "${seed}" (${market.toUpperCase()}) — ${warnings.join(' ')}`, true);
     } else {
-      showStatus($('suggest-status'), `Saved ${r.amazon.length} Amazon + ${r.google.length} Google suggestions for "${seed}".${warnings.length ? ` Note: ${warnings.join(' ')}` : ''}`);
+      showStatus($('suggest-status'), `Saved ${r.amazon.length} Amazon + ${r.google.length} Google suggestions for "${seed}" (${market.toUpperCase()}).${warnings.length ? ` Note: ${warnings.join(' ')}` : ''}`);
     }
     refresh();
   } catch (err) {
@@ -104,10 +122,10 @@ $('suggest-go').addEventListener('click', async () => {
 });
 
 $('suggest-expand').addEventListener('click', async () => {
-  const s = await settings();
+  const market = currentMarket();
   try {
-    const r = await send('EXPAND_FROM_SUGGESTIONS', { market: s.market });
-    showStatus($('suggest-status'), `Expanded ${r.count} unique suggestions; queued scraping.`);
+    const r = await send('EXPAND_FROM_SUGGESTIONS', { market });
+    showStatus($('suggest-status'), `Expanded ${r.count} unique suggestions (${market.toUpperCase()}); queued scraping.`);
     refresh();
   } catch (err) {
     showStatus($('suggest-status'), err.message, true);

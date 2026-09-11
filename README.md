@@ -1,4 +1,4 @@
-# KDP Copilot — v0.8.15
+# KDP Copilot — v0.8.16
 
 A Chrome extension (Manifest V3) that turns Amazon KDP keyword research into a **scored, rules-driven workflow**.
 It injects a research panel into Amazon search results, qualifies niches with a **rules-v1 engine**
@@ -31,7 +31,7 @@ and works without any API key via live Amazon + Google autocomplete.
 
 ## 1. Install
 
-1. Download `kdp-copilot-v0.8.15.zip` from the
+1. Download `kdp-copilot-v0.8.16.zip` from the
    [Releases page](https://github.com/YoucefSennoun/kdp-copilot/releases) and unzip it.
 2. Open `chrome://extensions`, enable **Developer mode** (top-right), click **Load unpacked**,
    and select the unzipped folder (the one containing `manifest.json`).
@@ -256,6 +256,11 @@ Described fully in [§4](#4-how-to-read-the-niche-finder-table). **Refresh** rel
 (use after changing scopes). Row actions: Details · Scrape · Legal.
 
 ### Suggestions — the staging area
+**Market chooser** (same 20 markets as Explorer) scopes every fetch to that storefront:
+Amazon queries its per-market completion host and Google its market language/country, so
+suggestions reflect what that market's shoppers type. (Postal-code/ZIP pinning is a SERP
+concept — it applies automatically when *scraping*; autocomplete itself is
+marketplace-level, so no ZIP is needed here.)
 **Fetch Suggested Keywords**: 2-second, zero-tab preview of what shoppers type for a seed
 (Amazon + Google, relevance-ranked). **Expand** (per row): full pipeline rooted at that
 phrase — slow (minutes), with live progress. **Scrape** (per row): score just that one
@@ -328,7 +333,7 @@ brand filters (shows you *why* rows fail, useful for learning, not for picking).
 | `model deprecated` 404 | Provider retired the id → pick the replacement preset in Settings |
 | Start Over "doesn't stop" | Fixed in v0.8.5+: reset now cancels in-flight flows and pauses; next Research resumes |
 | Queue stuck on a CAPTCHA page | Timeout guard (30s) closes orphans automatically; solve captchas in your own browsing sparingly — scraping is intentionally slow to respect rate limits |
-| Scores look odd (e.g. `53.19…`) | Display rounding only — fixed in v0.8.15 (1 decimal everywhere) |
+| Scores look odd (e.g. `53.19…`) | Display rounding only — fixed in v0.8.16 (1 decimal everywhere) |
 
 ---
 
