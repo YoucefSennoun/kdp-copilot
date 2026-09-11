@@ -53,12 +53,16 @@ Open the dashboard → **Settings**.
    AI part of Research) use whichever you pick:
    - **Google Gemini (direct)** — paste a [Gemini API key](https://aistudio.google.com/apikey),
      keep model `gemini-3.6-flash`.
-   - **OpenAI-compatible** — for free/cheap models. Set Base URL to
-     `https://openrouter.ai/api/v1`, paste a key from `openrouter.ai/keys`, and use model
-     `xiaomi/mimo-v2.5` (cheap; OpenRouter's free starter credit covers many checks).
-     Any OpenAI-compatible endpoint works, and the model field accepts any id.
-     ⚠️ OpenCode Zen's *free* models only answer inside the OpenCode app — from this
-     extension they need paid Zen credit, so prefer OpenRouter for free use.
+    - **OpenAI-compatible** — for free/cheap models. Set Base URL to
+      `https://openrouter.ai/api/v1`, paste a key from `openrouter.ai/keys`, and use model
+      `xiaomi/mimo-v2.5` (cheap; OpenRouter's free starter credit covers many checks).
+      ⚠️ OpenCode Zen's *free* models only answer inside the OpenCode app — from this
+      extension they need paid Zen credit, so prefer OpenRouter for free use.
+    - <span>**You are not limited to the dropdown presets: the Model field accepts any
+      OpenRouter model id.** Type it in exactly (e.g. `nvidia/nemotron-3-super-120b-a12b:free`),
+      Save, and Analyze, Listing, Legal sweep and AI Expand will all run on it. Free `:free`
+      models are rate-limited (the tool retries automatically); if an id is wrong or retired,
+      the error message names the problem.</span>
 3. **Leave every gate at its default** for your first niches (see [§8](#8-settings--gates-what-to-change-and-what-to-leave-alone)
    for what each one means). The defaults encode the built-in research rules.
 4. Click **Save Settings**.
